@@ -264,7 +264,8 @@ def fitTiles(visit, detector, config=None, outDir="detector_run", tile=400, pad=
              taskIndex=0, nTasks=1, region=None, repo="dp2_prep",
              collection="LSSTCam/runs/DRP/DP2", instrument="LSSTCam",
              visitImageCollections="LSSTCam/runs/*", psfSource="visit", overwrite=False,
-             visitImage=None, plots=None, plotDir=None, allSourcePages=False, **overrides):
+             visitImage=None, plots=None, plotDir=None, allSourcePages=False, nJobs=1,
+             **overrides):
     """Fit this task's share of a detector's tiles and write one file per tile.
 
     Tiles already on disk are skipped, so the job can be restarted; a failing tile is reported
@@ -310,6 +311,10 @@ def fitTiles(visit, detector, config=None, outDir="detector_run", tile=400, pad=
         Directory for the plots (default ``<outDir>/plots``).
     allSourcePages : `bool`, optional
         Write a per-source page for every source of a plotted tile (default: 4 pages).
+    nJobs : `int`, optional
+        Fit this many tiles at once in forked worker processes (use the job's CPU count, e.g.
+        ``$SLURM_CPUS_PER_TASK``); each worker writes its tile file and its log
+        (``<outDir>/logs/<tile>.log``).  1 = one after another in this process.
     **overrides
         Keyword arguments of ``runSessionGaia`` (e.g. ``maxOuter=3, maxInner=15``).
 
@@ -318,12 +323,8 @@ def fitTiles(visit, detector, config=None, outDir="detector_run", tile=400, pad=
     paths : `list` [`str`]
         Tile files of this task that exist.
     """
-    import contextlib
-    import io
     from . import session as cn
     from .gaiaCatalog import attachGaia
-    from .photometry import measurePhotometry
-    from .pipeline import runSessionGaia
     os.makedirs(outDir, exist_ok=True)
     if visitImage is None:
         visitImage = _loadVisitImage(visit, detector, repo, collection, instrument,
@@ -371,40 +372,118 @@ def fitTiles(visit, detector, config=None, outDir="detector_run", tile=400, pad=
                **({"repo": repo} if repo else {}))
     kw = dict(maxOuter=3, maxInner=15, psfPolishCycles=3)
     kw.update(overrides)
+    _TILE.clear()
+    _TILE.update(sess=sess, cfg=cfg, kw=kw, paths=paths, plotNames=plotNames, plotDir=plotDir,
+                 allSourcePages=allSourcePages, visit=visit, detector=detector)
     tAll = time.perf_counter()
-    for k, s in enumerate(todo):
-        name = tileName(s)
-        t0 = time.perf_counter()
-        print(f"\n######## tile {k + 1}/{len(todo)}: {name}")
-        try:
-            runs = runSessionGaia(sess, cfg, names=[name], plotFinal=False, **kw)
-            run = runs[name]
-            with contextlib.redirect_stdout(io.StringIO()):
-                phot = (run.photometry if getattr(run, "photometry", None) is not None
-                        else measurePhotometry(run, verbose=False, gaia=getattr(sess, "gaia", None)))
-            saveTileProducts(run, paths[name], phot,
-                             meta=dict(visit=visit, detector=detector,
-                                       seconds=time.perf_counter() - t0))
-            if name in plotNames:
-                from .runPlots import saveRunPlots
-                t1 = time.perf_counter()
-                print(f"######## tile {name}: writing all plots")
-                saveRunPlots(run, os.path.join(plotDir, name), phot=phot,
-                             initialBackground=getattr(sess, "bgImage", None),
-                             allSourcePages=allSourcePages)
-                print(f"######## tile {name}: plots took {time.perf_counter() - t1:.0f} s")
-            nIn = int(np.sum(phot["inInterior"])) if "inInterior" in phot.colnames else len(phot)
-            print(f"######## tile {name}: {nIn} sources in its interior, "
-                  f"{time.perf_counter() - t0:.0f} s -> {paths[name]}")
-        except Exception as e:                       # keep going: one bad tile must not kill the job
-            import traceback
-            traceback.print_exc()
-            print(f"######## tile {name} FAILED ({type(e).__name__}: {e}) -- rerun to retry")
-        finally:
-            sess.jobs.pop(name, None)                # free the cutout
+    names = [tileName(s) for s in todo]
+    if nJobs and nJobs > 1 and len(names) > 1:
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        logDir = os.path.join(outDir, "logs")
+        os.makedirs(logDir, exist_ok=True)
+        _TILE["logDir"] = logDir
+        n = min(int(nJobs), len(names))
+        print(f"fitting {len(names)} tile(s) with {n} parallel workers; per-tile logs in {logDir}")
+        with ProcessPoolExecutor(n, mp_context=mp.get_context("fork")) as ex:
+            futs = [ex.submit(_fitTileWorker, name) for name in names]
+            for k, fut in enumerate(as_completed(futs)):
+                name, ok, secs, nIn, err = fut.result()
+                print(f"[{k + 1}/{len(names)}, {time.perf_counter() - tAll:6.0f} s] tile {name}: "
+                      + (f"{nIn} sources, {secs:.0f} s" if ok else f"FAILED ({err}) -- rerun to retry"))
+    else:
+        for k, name in enumerate(names):
+            print(f"\n######## tile {k + 1}/{len(names)}: {name}")
+            _fitTile(name)
+    _TILE.clear()
     print(f"\ntask {taskIndex + 1}/{nTasks}: {len(todo)} tile(s) in "
           f"{time.perf_counter() - tAll:.0f} s")
     return sorted(p for p in paths.values() if os.path.exists(p))
+
+
+# ---------------------------------------------------------------- fitting one tile
+_TILE = {}       # state shared with forked tile workers (set by fitTiles, nothing is pickled)
+
+
+def _fitTile(name):
+    """Fit one tile of the current `fitTiles` call and write its file (and plots).
+
+    Parameters
+    ----------
+    name : `str`
+        Tile name.
+
+    Returns
+    -------
+    nIn : `int` or `None`
+        Sources in the tile's interior; None if the tile failed.
+    """
+    import contextlib
+    import io
+    from .photometry import measurePhotometry
+    from .pipeline import runSessionGaia
+    sess, cfg, kw, paths = _TILE["sess"], _TILE["cfg"], _TILE["kw"], _TILE["paths"]
+    plotNames, plotDir = _TILE["plotNames"], _TILE["plotDir"]
+    allSourcePages, visit, detector = _TILE["allSourcePages"], _TILE["visit"], _TILE["detector"]
+    t0 = time.perf_counter()
+    nIn = None
+    try:
+        runs = runSessionGaia(sess, cfg, names=[name], plotFinal=False, **kw)
+        run = runs[name]
+        with contextlib.redirect_stdout(io.StringIO()):
+            phot = (run.photometry if getattr(run, "photometry", None) is not None
+                    else measurePhotometry(run, verbose=False, gaia=getattr(sess, "gaia", None)))
+        saveTileProducts(run, paths[name], phot,
+                         meta=dict(visit=visit, detector=detector,
+                                   seconds=time.perf_counter() - t0))
+        if name in plotNames:
+            from .runPlots import saveRunPlots
+            t1 = time.perf_counter()
+            print(f"######## tile {name}: writing all plots")
+            saveRunPlots(run, os.path.join(plotDir, name), phot=phot,
+                         initialBackground=getattr(sess, "bgImage", None),
+                         allSourcePages=allSourcePages)
+            print(f"######## tile {name}: plots took {time.perf_counter() - t1:.0f} s")
+        nIn = int(np.sum(phot["inInterior"])) if "inInterior" in phot.colnames else len(phot)
+        print(f"######## tile {name}: {nIn} sources in its interior, "
+              f"{time.perf_counter() - t0:.0f} s -> {paths[name]}")
+    except Exception as e:                       # keep going: one bad tile must not kill the job
+        import traceback
+        traceback.print_exc()
+        print(f"######## tile {name} FAILED ({type(e).__name__}: {e}) -- rerun to retry")
+    finally:
+        sess.jobs.pop(name, None)                # free the cutout
+    return nIn
+
+
+def _fitTileWorker(name):
+    """Fit one tile in a forked worker: one BLAS thread, output to the tile's log file.
+
+    Parameters
+    ----------
+    name : `str`
+        Tile name.
+
+    Returns
+    -------
+    result : `tuple`
+        (name, ok, seconds, sources in the interior, error text).
+    """
+    import contextlib
+    t0 = time.perf_counter()
+    try:
+        from threadpoolctl import threadpool_limits
+        limit = threadpool_limits(1)        # the workers already use every core
+    except Exception:
+        limit = contextlib.nullcontext()
+    log = os.path.join(_TILE["logDir"], f"{name}.log")
+    try:
+        with open(log, "w") as fh, contextlib.redirect_stdout(fh), contextlib.redirect_stderr(fh), limit:
+            nIn = _fitTile(name)
+        return name, nIn is not None, time.perf_counter() - t0, nIn, None if nIn is not None \
+            else f"see {log}"
+    except Exception as e:
+        return name, False, time.perf_counter() - t0, None, f"{type(e).__name__}: {e}"
 
 
 def _detectorPlots(visitImage, outDir, session, visit, detector, repo, collection, instrument,

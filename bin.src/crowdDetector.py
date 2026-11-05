@@ -96,6 +96,9 @@ def main(argv=None):
     f.add_argument("--all-source-pages", action="store_true",
                    help="a per-source page for every source of a plotted tile (default 4 pages)")
     f.add_argument("--overwrite", action="store_true")
+    f.add_argument("--n-jobs", type=int, default=_envInt("SLURM_CPUS_PER_TASK", 1),
+                   help="tiles fitted at once in parallel worker processes (default: "
+                        "$SLURM_CPUS_PER_TASK, else 1)")
     f.add_argument("--joint-solver", default="eigen", choices=("eigen", "normal", "scipy"),
                    help="joint flux-fit solver: eigen (pipe_crowd's sparse Eigen LSCG, default), "
                         "normal (previous dense NNLS) or scipy (lsq_linear)")
@@ -127,7 +130,7 @@ def main(argv=None):
                           taskIndex=args.task_index, nTasks=args.n_tasks, region=args.region,
                           repo=args.repo, collection=args.collection, overwrite=args.overwrite,
                           maxOuter=args.max_outer, maxInner=args.max_inner,
-                          jointSolver=args.joint_solver,
+                          jointSolver=args.joint_solver, nJobs=args.n_jobs,
                           plots=_plots(args.plots), allSourcePages=args.all_source_pages)
     elif args.cmd == "stitch":
         detector.stitchTiles(args.out)

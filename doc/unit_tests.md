@@ -4,7 +4,7 @@ Every unit test in `tests/`: what it checks, what it feeds in, and what it must 
 pass.  How to run them and read the results is in the
 [pipeline guide](pipeline_guide.md#unit-tests-running-them-and-checking-the-results).
 
-The suite has **121 tests in 12 files**.  Without the Rubin stack 119 run and the 2 in
+The suite has **122 tests in 12 files**.  Without the Rubin stack 120 run and the 2 in
 `test_fastStampsStack.py` are skipped; `testCxxEqualsNumpy` is also skipped if the C++ extension
 was not built, and the `test_sparseSolver.py` solver tests if it was built without the
 sparse solver.  `test_docstrings.py` checks that this page lists every test and that the
@@ -225,6 +225,7 @@ real code.
 | `FitStitchTestCase.testTasksResumeAndStitch` | Slurm-style task split, restart, stitch | 2 tasks of 9 tiles, then a rerun | tasks share the 9 tiles without overlap; rerun refits nothing; mosaic data and model equal the inputs; residual/σ spread ≈ 1; every star once with the right flux; files reload |
 | `FitStitchTestCase.testRegionAndGaps` | A partial run | only the corner tile | 1 file; mosaic 200 × 167 px |
 | `FitStitchTestCase.testFailingTileDoesNotStopTask` | One failing tile | one tile raises an error | the other 8 written; the gap marked in the TILE map |
+| `FitStitchTestCase.testParallelWorkersSameAsSerial` | `fitTiles(nJobs=3)`: tiles fitted in forked worker processes | the synthetic 3 x 3-tile detector, one tile raising an error | 8 tile files and 9 logs; a rerun fits only the failed tile; the stitched model, tile map and catalogue equal a serial run's |
 | `FitStitchTestCase.testPlot` | `plotDetector` | stitched mosaic; a zoom, greyscale, sources circled | PNG written; residual/σ spread ≈ 1; binning 1 for the zoom |
 | `FitStitchTestCase.testTile` | `loadTile`, `plotTile` | the corner tile | interior at (0, 0), width = interior + 20 px pad; `owned` count right; PNG written; residual/σ ≈ 1 |
 | `FitStitchTestCase.testResidualImages` | Tile files and the mosaic carry the residual images | the corner tile; its stitched mosaic | tiles have DATA, MODEL, RESIDUAL, RESIDUAL_SIGMA, VARIANCE, BAD; RESIDUAL = DATA − MODEL and RESIDUAL_SIGMA = RESIDUAL / √VARIANCE; the mosaic has RESIDUAL_SIGMA with scatter ≈ 1; `loadMosaic` / `loadTile` return `residSigma` |

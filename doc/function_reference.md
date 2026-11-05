@@ -2119,7 +2119,7 @@ DATA, MODEL, RESIDUAL, RESIDUAL_SIGMA, VARIANCE and BAD images over the tile's f
 
 ### detector.fitTiles
 
-`fitTiles(visit, detector, config=None, outDir='detector_run', tile=400, pad=30, taskIndex=0, nTasks=1, region=None, repo='dp2_prep', collection='LSSTCam/runs/DRP/DP2', instrument='LSSTCam', visitImageCollections='LSSTCam/runs/*', psfSource='visit', overwrite=False, visitImage=None, plots=None, plotDir=None, allSourcePages=False, **overrides)`
+`fitTiles(visit, detector, config=None, outDir='detector_run', tile=400, pad=30, taskIndex=0, nTasks=1, region=None, repo='dp2_prep', collection='LSSTCam/runs/DRP/DP2', instrument='LSSTCam', visitImageCollections='LSSTCam/runs/*', psfSource='visit', overwrite=False, visitImage=None, plots=None, plotDir=None, allSourcePages=False, nJobs=1, **overrides)`
 
 Fit this task's share of a detector's tiles and write one file per tile.
 
@@ -2143,6 +2143,7 @@ Tiles already on disk are skipped, so the job can be restarted; a failing tile i
 | `plots` | `str` or `list` [`str`], optional | Tiles to write all plots for: None (no plots), 'sample' (the tiles at the corners, the centre and two edge midpoints, `lsst.meas.crowd.runPlots.sampleTileNames`), 'all', or a list of tile names. |
 | `plotDir` | `str`, optional | Directory for the plots (default ``<outDir>/plots``). |
 | `allSourcePages` | `bool`, optional | Write a per-source page for every source of a plotted tile (default: 4 pages). |
+| `nJobs` | `int`, optional | Fit this many tiles at once in forked worker processes (use the job's CPU count, e.g. ``$SLURM_CPUS_PER_TASK``); each worker writes its tile file and its log (``<outDir>/logs/<tile>.log``).  1 = one after another in this process. |
 | `**overrides` | – | Keyword arguments of ``runSessionGaia`` (e.g. ``maxOuter=3, maxInner=15``). |
 
 | Returns | Type | Description |

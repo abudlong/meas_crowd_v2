@@ -187,6 +187,30 @@ class FitStitchTestCase(unittest.TestCase):
         m = det.stitchTiles(self.out, verbose=False)
         self.assertTrue(np.any(m["tile"] < 0))                      # the gap is marked
 
+    def testParallelWorkersSameAsSerial(self):
+        """nJobs > 1 fits every tile in worker processes: same mosaic, logs, failures reported."""
+        good = self.syn.runSessionGaia
+
+        def flaky(sess, cfg, names=None, **kw):
+            if names[0].startswith("x0200_y0167"):
+                raise RuntimeError("boom")
+            return good(sess, cfg, names=names, **kw)
+
+        with mock.patch.object(pipeline, "runSessionGaia", flaky):
+            files = self._fit(nJobs=3)
+        self.assertEqual(len(files), 8)                              # the failing tile is missing
+        logs = os.listdir(os.path.join(self.out, "logs"))
+        self.assertEqual(len(logs), 9)
+        files = self._fit(nJobs=3)                                   # rerun: only that tile
+        self.assertEqual(len(files), 9)
+        par = det.stitchTiles(self.out, verbose=False)
+        serialOut = os.path.join(self.out, "serial")
+        det.fitTiles(1, 2, outDir=serialOut, tile=200, pad=20, visitImage=self.syn.visitImage)
+        ser = det.stitchTiles(serialOut, verbose=False)
+        np.testing.assert_array_equal(par["model"], ser["model"])
+        np.testing.assert_array_equal(par["tile"], ser["tile"])
+        self.assertEqual(len(par["catalog"]), len(ser["catalog"]))
+
     def testPlot(self):
         self._fit()
         m = det.stitchTiles(self.out, verbose=False)

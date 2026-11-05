@@ -2353,15 +2353,16 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
         if not P["brightCorr"]:
             bcorr = {}
             return fit["modelFull"]
-        corr, bcorr = brightStarCorrections(exposure, S, fit, fit["modelFull"], psfPeak,
-                                            noise, fwhm, badBitmask, P["brightCorrSigma"],
-                                            P["brightCorrRadiusFwhm"],
-                                            radial=P["brightCorrRadial"], zones=zones,
-                                            haloModes=P["satHaloModes"],
-                                            brightModes=P["brightAngularModes"],
-                                            coreRings=P["brightCoreRingsPx"],
-                                            coreSigma=P["brightCoreRingSigma"],
-                                            coreModes=P["brightCoreModes"])
+        with timer.step("[nested] bright-star corrections", outer=outerIdx):
+            corr, bcorr = brightStarCorrections(exposure, S, fit, fit["modelFull"], psfPeak,
+                                                noise, fwhm, badBitmask, P["brightCorrSigma"],
+                                                P["brightCorrRadiusFwhm"],
+                                                radial=P["brightCorrRadial"], zones=zones,
+                                                haloModes=P["satHaloModes"],
+                                                brightModes=P["brightAngularModes"],
+                                                coreRings=P["brightCoreRingsPx"],
+                                                coreSigma=P["brightCoreRingSigma"],
+                                                coreModes=P["brightCoreModes"])
         return fit["modelFull"] + corr
     prevAmpUid = {}
     diag, stop, noProg = None, "maxInner", 0
@@ -2607,7 +2608,8 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
         import types
         fake = types.SimpleNamespace(outerHistory=[dict(
             exposure=exposure, result=dict(S=S, snaps=[dict(fit=fit)], modelFull=modelFull))])
-        with contextlib.redirect_stdout(io.StringIO()):
+        with contextlib.redirect_stdout(io.StringIO()), \
+                timer.step("end of pass: halo check", outer=outerIdx):
             tb = checkBrightNeighbours(fake, brightSnr=P["haloCheckSnr"],
                                        withinFwhm=P["haloCheckFwhm"], plot=False,
                                        verbose=False, similarMin=P["haloSimilarMin"])
@@ -2633,7 +2635,8 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
                   f"stars as halo mimics (repeat at >= {P['haloSimilarMin']} control angles or "
                   f"significance < 3); they will not be re-detected")
     if P["dropRingMimics"] and fit is not None and snaps and len(S["xy"]):
-        badIds, nChk = ringMimics(exposure, S, fit, modelFull, P, fwhm, psfPeak, noise)
+        with timer.step("end of pass: ring check", outer=outerIdx):
+            badIds, nChk = ringMimics(exposure, S, fit, modelFull, P, fwhm, psfPeak, noise)
         if badIds:
             keep = np.ones(len(S["xy"]), bool)
             keep[badIds] = False
@@ -2655,8 +2658,9 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
               f"{P['ringSnr']:g}); they will not be re-detected")
     def _polish(label):
         nonlocal S, fit, modelFull, diag
-        S, fNew, info = finalPositionPolish(exposure, psf, S, fit, badBitmask, P, fitkw, fwhm,
-                                            psfSigma)
+        with timer.step("end of pass: position polish", outer=outerIdx):
+            S, fNew, info = finalPositionPolish(exposure, psf, S, fit, badBitmask, P, fitkw, fwhm,
+                                                psfSigma)
         if fNew is not fit:
             fit = fNew
             modelFull = corrected(fit)
@@ -2670,8 +2674,9 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
     if P["finalPolish"] and fit is not None and snaps and len(S["xy"]):
         _polish("final position polish")
     if P["splitTest"] and fit is not None and snaps and len(S["xy"]):
-        S_new, fNew, nTry, nKeep = splitTest(exposure, psf, S, fit, modelFull, P, fwhm,
-                                             psfPeak, noise, badBitmask, fitkw)
+        with timer.step("end of pass: split test", outer=outerIdx):
+            S_new, fNew, nTry, nKeep = splitTest(exposure, psf, S, fit, modelFull, P, fwhm,
+                                                 psfPeak, noise, badBitmask, fitkw)
         print(f"  split test: {nTry} source(s) with a lopsided residual tried as pairs, "
               f"{nKeep} second source(s) kept")
         if nKeep:
@@ -2685,8 +2690,9 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
             if P["finalPolish"]:
                 _polish("position polish after split")
     if P["ellipTest"] and fit is not None and snaps and len(S["xy"]):
-        S_new, fNew, nTry, nKeep = ellipTest(exposure, psf, S, fit, modelFull, P, fwhm,
-                                             psfPeak, noise, badBitmask, fitkw, psfSigma)
+        with timer.step("end of pass: elliptical test", outer=outerIdx):
+            S_new, fNew, nTry, nKeep = ellipTest(exposure, psf, S, fit, modelFull, P, fwhm,
+                                                 psfPeak, noise, badBitmask, fitkw, psfSigma)
         print(f"  elliptical test: {nTry} badly fitted source(s) tried as elliptical extended "
               f"sources, {nKeep} kept")
         if nKeep:
@@ -3781,10 +3787,14 @@ def printTiming(timer=None):
         if r["kind"] == "compute":
             tot[r["label"]] += r["seconds"]
             cnt[r["label"]] += 1
+    wall = time.perf_counter() - timer.tStart
     print(f"\n{'step':40s} {'calls':>6s} {'total [s]':>10s}")
-    for k, v in sorted(tot.items(), key=lambda kv: -kv[1])[:20]:
+    for k, v in sorted(tot.items(), key=lambda kv: -kv[1])[:30]:
         print(f"{k:40s} {cnt[k]:6d} {v:10.2f}")
-    print(f"wall clock: {time.perf_counter() - timer.tStart:.1f}s")
+    top = sum(v for k, v in tot.items() if not k.startswith("[nested]"))
+    print(f"{'(not in any step above)':40s} {'':6s} {max(wall - top, 0.0):10.2f}")
+    print("[nested] steps run inside the others and are not added to the total")
+    print(f"wall clock: {wall:.1f}s")
 
 
 def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=None,
@@ -3931,7 +3941,8 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
                 import types
                 fake = types.SimpleNamespace(outerHistory=[hist[-1]], badBitmask=badBitmask,
                                              config=cfg)
-                with contextlib.redirect_stdout(io.StringIO()):
+                with contextlib.redirect_stdout(io.StringIO()), \
+                        L.TIMER.step("noise check (autoPoisson)", outer=k):
                     dg = diagnoseResidual(fake, plot=False)
                 share = dg.get("noiseShare", 0.0)
                 hfR = dg["highfreq"]["ratio"]
@@ -3951,7 +3962,8 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
                 print(f"  noise check failed ({type(e).__name__}: {e})")
         if P["modelErrMeasure"] and res["snaps"]:
             try:
-                eps, _ = measureModelError(expW, res, P)
+                with L.TIMER.step("PSF model-error measurement", outer=k):
+                    eps, _ = measureModelError(expW, res, P)
                 hist[-1]["modelErr"] = eps
                 if P["fitSysFromData"] and eps > 0:
                     P["sysFrac"] = max(eps, 0.002)
