@@ -29,13 +29,13 @@ import scipy.sparse as sp
 from scipy.optimize import lsq_linear, nnls
 
 import lsstStubs
+from lsstStubs import Box2I, Point2I   # the box type FakeExposure uses, with or without the stack
 
 lsstStubs.install()
 
 from lsst.meas.crowd import fitLib as L  # noqa: E402
 from lsst.meas.crowd import pipeline as pl  # noqa: E402
 from lsst.meas.crowd import sparseSolver as ss  # noqa: E402
-from lsst.geom import Box2I, Point2I  # noqa: E402
 
 needsSolver = unittest.skipUnless(ss.HAVE_SPARSE_SOLVER, "C++ sparse solver not built")
 
