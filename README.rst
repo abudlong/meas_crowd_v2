@@ -116,9 +116,9 @@ stack)::
 If the extension is not built, ``fastKernels`` falls back to an equivalent NumPy implementation
 (identical results, about 6x slower) and the joint fits fall back to ``jointSolver="normal"``.
 
-The extension needs the Eigen headers (for the sparse solver).  The stack provides them
-(``setupRequired(eigen)``; on the RSP ``setup.py`` finds them under ``$EIGEN_DIR`` or
-``$CONDA_PREFIX/include/eigen3``); elsewhere ``apt install libeigen3-dev`` or ``conda install eigen``,
+The extension needs the Eigen headers (for the sparse solver).  The stack's conda environment
+provides them (Eigen is not an eups product in recent stacks); ``scons`` and ``setup.py`` find
+them under ``$CONDA_PREFIX/include/eigen3`` (or ``$EIGEN_DIR``); elsewhere ``apt install libeigen3-dev`` or ``conda install eigen``,
 or point ``EIGEN_INCLUDE_DIR`` at them.  On the RSP without a terminal, the first cells of
 ``examples/compare_solvers.ipynb`` build the extension in place.
 
