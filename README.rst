@@ -91,7 +91,8 @@ The package follows the Rubin DM layout (``sconsUtils`` + ``eups``)::
     tests/                        unit tests (run with or without the stack)
     examples/                     run_visit.py (notebook cells), run_visit_batch.py (terminal),
                                   usdf_job.sh, usdf_detector_array.sh (Slurm), benchmark_stamps.py,
-                                  benchmark_solver.py, compare_solvers.ipynb (old vs new solver)
+                                  benchmark_solver.py, run_eigen_solver.ipynb (a run with the new
+                                  solver), compare_solvers.ipynb (old vs new solver)
     doc/                          user guide, algorithm, function reference, catalogue, unit tests,
                                   command-line runs
 
