@@ -1595,11 +1595,8 @@ from scipy.signal import fftconvolve
 
 import lsst.geom as geom
 import lsst.afw.math as afwMath
-try:                                    # C++ per-source loops (joint-fit matrix and model);
-    import importlib as _importlib       # imported by name, not through the package's lazy loader
-    _lib = _importlib.import_module("lsst.meas.crowd._crowdLib")
-except ImportError:
-    _lib = None
+from ._cxx import load as _loadCxx
+_lib = _loadCxx()                       # C++ per-source loops; None if not built, raises if stale
 import lsst.afw.table as afwTable
 from lsst.meas.algorithms import SourceDetectionTask
 from lsst.meas.algorithms.subtractBackground import TooManyMaskedPixelsError

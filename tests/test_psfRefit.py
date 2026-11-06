@@ -1,0 +1,164 @@
+# This file is part of meas_crowd.
+#
+# Developed for the LSST Data Management System.
+# This product includes software developed by the LSST Project
+# (https://www.lsst.org).
+# See the COPYRIGHT file at the top-level directory of this distribution
+# for details of code ownership.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+"""The PIFF PSF refit (refitPsf="piff"): the neighbour-subtracted image and the wiring to the
+stack's tasks.  PIFF itself is not run here (it needs the Rubin stack); a recording stand-in
+checks what it would be given."""
+
+import copy
+import sys
+import types
+import unittest
+from unittest import mock
+
+import numpy as np
+
+import lsstStubs
+from lsstStubs import Box2I, Point2I
+
+lsstStubs.install()
+
+from lsst.meas.crowd import fitLib as L  # noqa: E402
+from lsst.meas.crowd import pipeline as pl  # noqa: E402
+from test_sparseSolver import _gaussStamp  # noqa: E402
+
+
+def _scene(n=120, sigma=1.8, half=12, seed=2):
+    rng = np.random.default_rng(seed)
+    xy = rng.uniform(15, n - 15, (40, 2))
+    flux = 10 ** rng.uniform(3, 4.5, len(xy))
+    stamp = _gaussStamp(sigma, half)
+    box = Box2I(Point2I(0, 0), Point2I(n - 1, n - 1))
+    comps, model = [], np.zeros((n, n))
+    for (x, y), f in zip(xy, flux):
+        a, bb = stamp(None, x, y, box)
+        ys, xs = slice(bb.getMinY(), bb.getMaxY() + 1), slice(bb.getMinX(), bb.getMaxX() + 1)
+        comps.append(dict(stamp=a, ys=ys, xs=xs))
+        model[ys, xs] += f * a
+    data = model + rng.normal(size=model.shape) * 5.0
+    fit = dict(modelFull=model, comps=comps, amps=flux)
+    return data, fit, xy, flux, comps
+
+
+class PsfStarImageTestCase(unittest.TestCase):
+    def testOnlyThePsfStarsRemain(self):
+        data, fit, xy, flux, comps = _scene()
+        exp = lsstStubs.FakeExposure(data.copy(), np.full(data.shape, 25.0))
+        idx = [3, 17, 30]
+        img = pl.psfStarImage(exp, fit, idx)
+        stars = np.zeros_like(data)
+        for j in idx:
+            stars[comps[j]["ys"], comps[j]["xs"]] += flux[j] * comps[j]["stamp"]
+        np.testing.assert_allclose(img, (data - fit["modelFull"]) + stars, atol=1e-9)
+        np.testing.assert_array_equal(exp.image.array, data)            # input untouched
+
+
+class _Cat(list):
+    def __init__(self, schema=None):
+        super().__init__()
+
+    def addNew(self):
+        rec = types.SimpleNamespace(pos=None)
+        rec.set = lambda key, value, r=rec: setattr(r, "pos", (value[0], value[1]))
+        self.append(rec)
+        return rec
+
+    def copy(self, deep=False):
+        out = _Cat()
+        out.extend(self)
+        return out
+
+
+class RefitPsfPiffWiringTestCase(unittest.TestCase):
+    def test(self):
+        data, fit, xy, flux, comps = _scene()
+        u = np.arange(-12, 13)
+        K = np.exp(-0.5 * (u[None] ** 2 + u[:, None] ** 2) / 1.8 ** 2)
+        psf = lsstStubs.FakePsf(K / K.sum())
+
+        class Exp(lsstStubs.FakeExposure):
+            def clone(self):
+                return copy.deepcopy(self)
+
+            def setPsf(self, p):
+                self._psf = p
+
+        exp = Exp(data.copy(), np.full(data.shape, 25.0))
+        res = dict(snaps=[dict(fit=fit)], S=dict(xy=xy))
+        idx = list(range(0, 40, 3))
+        seen = {}
+
+        class FakeMakeCandidates:
+            ConfigClass = staticmethod(lambda: types.SimpleNamespace(kernelSize=None))
+
+            def __init__(self, config):
+                seen["candidateStamp"] = config.kernelSize
+
+            def run(self, cat, exposure):
+                seen["candidatePositions"] = [r.pos for r in cat]
+                seen["candidateImage"] = exposure.image.array.copy()
+                return types.SimpleNamespace(psfCandidates=list(range(len(cat))))
+
+        class FakePiff:
+            ConfigClass = staticmethod(lambda: types.SimpleNamespace(spatialOrder=2, stampSize=0))
+
+            def __init__(self, config):
+                seen["config"] = config
+
+            def determinePsf(self, exposure, cands, metadata):
+                seen["nCands"] = len(cands)
+                return psf, None
+
+        piffMod = types.ModuleType("lsst.meas.extensions.piff.piffPsfDeterminer")
+        piffMod.PiffPsfDeterminerTask = FakePiff
+        dafBase = types.ModuleType("lsst.daf.base")
+        dafBase.PropertyList = dict
+        afwTable = types.SimpleNamespace(
+            SourceTable=types.SimpleNamespace(makeMinimalSchema=lambda: types.SimpleNamespace(
+                getAliasMap=lambda: types.SimpleNamespace(set=lambda *a: None))),
+            Point2DKey=types.SimpleNamespace(addFields=lambda *a: "centroidKey"),
+            SourceCatalog=_Cat)
+        P = dict(pl._params({}), piffStampSize=25, piffSpatialOrder=1, piffMinStars=5)
+        mods = {"lsst.meas.extensions": types.ModuleType("lsst.meas.extensions"),
+                "lsst.meas.extensions.piff": types.ModuleType("lsst.meas.extensions.piff"),
+                "lsst.meas.extensions.piff.piffPsfDeterminer": piffMod, "lsst.daf.base": dafBase}
+        with mock.patch.dict(sys.modules, mods), \
+                mock.patch.object(pl, "selectPsfStars", lambda *a, **k: idx), \
+                mock.patch.object(L, "afwTable", afwTable, create=True), \
+                mock.patch.object(L, "MakePsfCandidatesTask", FakeMakeCandidates, create=True), \
+                mock.patch.object(L, "_filterValidPsfCandidates", lambda c, verbose=True: c,
+                                  create=True), \
+                mock.patch.object(L, "_fwhm", lambda p, pt: 4.24, create=True):
+            out = pl.refitPsfPiff(exp, psf, res, P, (60.0, 60.0), verbose=False)
+            self.assertIs(out, psf)
+            self.assertEqual(seen["candidateStamp"], 25)
+            self.assertEqual((seen["config"].spatialOrder, seen["config"].stampSize), (1, 25))
+            self.assertEqual(seen["nCands"], len(idx))
+            np.testing.assert_allclose(seen["candidatePositions"], xy[idx])
+            np.testing.assert_allclose(seen["candidateImage"], pl.psfStarImage(exp, fit, idx),
+                                       atol=1e-3)
+            with mock.patch.object(pl, "selectPsfStars", lambda *a, **k: idx[:3]):
+                with self.assertRaises(RuntimeError):                  # too few stars
+                    pl.refitPsfPiff(exp, psf, res, P, (60.0, 60.0), verbose=False)
+
+
+if __name__ == "__main__":
+    unittest.main()

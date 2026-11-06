@@ -37,13 +37,10 @@ __all__ = ["HAVE_CXX", "lanczosWeights", "shiftImage", "taperStamp", "renderStam
 
 import numpy as np
 
-try:                                    # by name, not through the package's lazy loader
-    import importlib as _importlib
-    _lib = _importlib.import_module("lsst.meas.crowd._crowdLib")
-    HAVE_CXX = True
-except ImportError:                     # extension not built: NumPy fallback
-    _lib = None
-    HAVE_CXX = False
+from ._cxx import load as _loadCxx
+
+_lib = _loadCxx()                       # None if not built (NumPy fallback); raises if stale
+HAVE_CXX = _lib is not None
 _HAVE_WINDOW = HAVE_CXX and hasattr(_lib, "renderDerivativesWindow")   # older builds lack it
 
 

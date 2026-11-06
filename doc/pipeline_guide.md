@@ -128,7 +128,7 @@ In both cases the PSF is then refined inside each cutout between passes (`refitP
 | Option | Default | What it controls |
 | --- | --- | --- |
 | `pad` (`prepareSession`) | 0 (examples use 20) | Extra px fitted around each cutout so edge stars have their neighbours |
-| `refitPsf` | `"stack"` | PSF update between passes: `"stack"` (residual stack of clean stars, cross-validated), `True` (re-detect + PCA refit in the cutout), `False` (keep the PSF) |
+| `refitPsf` | `"stack"` | PSF update between passes: `"stack"` (residual stack of clean stars, cross-validated), `True` (re-detect + PCA refit in the cutout), `"piff"` (the Rubin pipelines' PIFF determiner on neighbour-subtracted stars, `piffStampSize`, `piffSpatialOrder`; falls back to `"stack"`), `False` (keep the PSF) |
 | `psfStackN`, `psfStackMinSnr` | 25, 50 | Number and minimum peak S/N of the clean stars in the stack |
 | `psfWingSize`, `psfExtBlend` | 81 px, (12, 16) px | Kernel size after the wing extension and the radii of the Moffat blend |
 | `wingsFromStars` | True | Measure the outer wings from bright and saturated stars |

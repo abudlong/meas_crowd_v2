@@ -332,6 +332,13 @@ stars in the cutout tell what the PSF is here.
    Moffat fitted to it replaces the kernel beyond 2–3 FWHM.
 5. **Regularise** again (as in step 3) and measure the change for the convergence test.
 
+**Alternative: PIFF** (`refitPsf="piff"`).  The visit PSF is a PIFF model; instead of the
+residual stack, PIFF itself (`lsst.meas.extensions.piff`) can be refitted: the same clean stars
+are left alone on the image with every other source's model subtracted (`psfStarImage`) and given
+to `PiffPsfDeterminerTask` at their fitted positions (stamp `piffStampSize` = 25 px, spatial order
+`piffSpatialOrder` = 1 over the cutout).  Wings and regularisation follow as above.  With fewer
+than `piffMinStars` = 10 stars, or if PIFF fails, the residual stack is used.
+
 Off by default (they did not help on the test data): a linearly varying PSF (`psfSpatial`), a
 median-stack core correction (`psfCoreMedian`) and a brightness-dependent PSF (`bfTerm`).
 

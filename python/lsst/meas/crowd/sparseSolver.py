@@ -46,12 +46,10 @@ import time
 import numpy as np
 from scipy.sparse import coo_matrix, csc_matrix, issparse
 
-try:
-    from ._crowdLib import solveSparseLeastSquares as _solve
-    HAVE_SPARSE_SOLVER = True
-except ImportError:                       # extension not built, or built before the solver
-    _solve = None
-    HAVE_SPARSE_SOLVER = False
+from ._cxx import load as _loadCxx
+
+_solve = getattr(_loadCxx(), "solveSparseLeastSquares", None)   # raises if the build is stale
+HAVE_SPARSE_SOLVER = _solve is not None
 
 
 @dataclass

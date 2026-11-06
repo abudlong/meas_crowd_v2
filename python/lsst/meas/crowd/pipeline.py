@@ -166,6 +166,11 @@ PIPELINE_DEFAULTS = dict(
     skyTerms=0,               # fit a sky background in every joint fit, together with the fluxes:
                                #   0 none, 1 a constant, 3 a tilted plane; the fitted sky is
                                #   subtracted from the working image after each fit
+    piffStampSize=25,         # refitPsf="piff": PIFF model stamp [px] (the visit PSF's is 25); the
+                               #   wings beyond it come from wingsFromStars / psfWingSize as for the
+                               #   other refits
+    piffSpatialOrder=1,       # refitPsf="piff": polynomial order of PIFF's variation over a cutout
+    piffMinStars=10,          # refitPsf="piff": fewer clean stars -> residual-stack refit instead
     bgMode="plane",           # background refit between passes: "plane" (tilted plane, sigma-clipped),
                                #   "constant", "spline" (SubtractBackgroundTask surface on bgBinSize
                                #   bins -- can swing by 100s of counts in the corners of a small,
@@ -3001,6 +3006,111 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
 # =====================================================================
 # Adaptive outer loop
 # =====================================================================
+def psfStarImage(exposure, fit, idx):
+    """Return the image with every source's model subtracted except the PSF stars ``idx``.
+
+    Each PSF star is left alone on (data - neighbours' models): the input for a standard PSF
+    determiner in a crowded field.  The joint fit's own model is used (without the bright-star
+    correction terms, which describe the PSF mismatch the new PSF should capture).
+
+    Parameters
+    ----------
+    exposure : `lsst.afw.image.Exposure`
+        The fitted exposure (not changed).
+    fit : `dict`
+        Joint fit (`fitLib.jointPsfFitDiag`) of that exposure.
+    idx : sequence [`int`]
+        The PSF stars (indices into the fit).
+
+    Returns
+    -------
+    image : `numpy.ndarray`
+        The data minus the model, plus the PSF stars' models.
+    """
+    out = np.array(exposure.image.array, dtype=float) - fit["modelFull"]
+    for j in idx:
+        c = fit["comps"][j]
+        if c is not None:
+            out[c["ys"], c["xs"]] += fit["amps"][j] * c["stamp"]
+    return out
+
+
+def refitPsfPiff(exposure, psf, res, P, point, verbose=True):
+    """Refit the PSF with PIFF (the Rubin pipelines' PSF determiner) on neighbour-subtracted stars.
+
+    The clean PSF stars of the pass (`selectPsfStars`) are left alone on an image with every other
+    source's model subtracted (`psfStarImage`), turned into PSF candidates at their fitted
+    positions (``MakePsfCandidatesTask``) and handed to ``PiffPsfDeterminerTask``
+    (``lsst.meas.extensions.piff``).  The wings beyond PIFF's stamp and the regularisation are
+    applied afterwards, as for the other refits.
+
+    Parameters
+    ----------
+    exposure : `lsst.afw.image.Exposure`
+        The fitted exposure of the pass.
+    psf : `lsst.afw.detection.Psf`
+        The pass's PSF.
+    res : `dict`
+        Result of `runInnerAdaptive`.
+    P : `dict`
+        Pipeline options (``psfStack*`` for the star selection, ``piff*``).
+    point : `lsst.geom.Point2D`
+        Where the PSF is evaluated (the cutout centre).
+    verbose : `bool`, optional
+        Print what was done.
+
+    Returns
+    -------
+    psf : `lsst.afw.detection.Psf`
+        The PIFF PSF.
+
+    Raises
+    ------
+    RuntimeError
+        Too few PSF stars, or no usable candidates.
+    """
+    from lsst.daf.base import PropertyList
+    from lsst.meas.extensions.piff.piffPsfDeterminer import PiffPsfDeterminerTask
+    fit = res["snaps"][-1]["fit"]
+    fwhm = L._fwhm(psf, point)
+    k = psf.computeKernelImage(point).array
+    psfPeak = float(k.max() / k.sum())
+    noise = float(np.sqrt(np.nanmedian(exposure.variance.array)))
+    idx = selectPsfStars(exposure, res, fwhm, psfPeak, noise, P, verbose=verbose)
+    if len(idx) < P["piffMinStars"]:
+        raise RuntimeError(f"{len(idx)} clean PSF stars, PIFF needs >= {P['piffMinStars']}")
+    clean = exposure.clone()
+    clean.image.array[:] = psfStarImage(exposure, fit, idx).astype(clean.image.array.dtype)
+    clean.setPsf(psf)
+    schema = L.afwTable.SourceTable.makeMinimalSchema()
+    centroid = L.afwTable.Point2DKey.addFields(schema, "centroid", "fitted position", "pixel")
+    schema.getAliasMap().set("slot_Centroid", "centroid")
+    cat = L.afwTable.SourceCatalog(schema)
+    for j in idx:
+        rec = cat.addNew()
+        rec.set(centroid, L.geom.Point2D(float(res["S"]["xy"][j, 0]), float(res["S"]["xy"][j, 1])))
+    cat = cat.copy(deep=True)                     # contiguous, as the tasks require
+    stamp = int(P["piffStampSize"])
+    mkCfg = L.MakePsfCandidatesTask.ConfigClass()
+    mkCfg.kernelSize = stamp
+    cands = L.MakePsfCandidatesTask(config=mkCfg).run(cat, exposure=clean).psfCandidates
+    cands = L._filterValidPsfCandidates(cands, verbose=verbose)
+    if not cands:
+        raise RuntimeError("no usable PSF candidates")
+    cfg = PiffPsfDeterminerTask.ConfigClass()
+    cfg.spatialOrder = int(P["piffSpatialOrder"])
+    for name in ("stampSize", "kernelSize"):     # the field's name depends on the stack version
+        if hasattr(cfg, name):
+            setattr(cfg, name, stamp)
+    out = PiffPsfDeterminerTask(config=cfg).determinePsf(clean, cands, PropertyList())
+    psfNew = out[0] if isinstance(out, tuple) else out
+    if verbose:
+        print(f"  PIFF PSF refit: {len(cands)} neighbour-subtracted stars (of {len(idx)} selected), "
+              f"spatial order {cfg.spatialOrder}, stamp {stamp} px; FWHM {fwhm:.3f} -> "
+              f"{L._fwhm(psfNew, point):.3f} px")
+    return psfNew
+
+
 def selectPsfStars(exposure, res, fwhm, psfPeak, noise, P, verbose=True):
     """Select clean, bright, isolated, unsaturated point sources for the PSF stack.
 
@@ -4313,6 +4423,22 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
                 except Exception as e:
                     print(f"  residual-stack PSF refit failed ({type(e).__name__}: {e})")
                     psfNew = psfW
+        elif P["refitPsf"] == "piff":
+            with L.TIMER.step("PSF refit (PIFF)", outer=k):
+                try:
+                    psfNew = refitPsfPiff(expW, psfW, res, P, c)
+                except Exception as e:
+                    print(f"  PIFF PSF refit failed ({type(e).__name__}: {e}) -- residual-stack "
+                          f"refit instead")
+                    try:
+                        psfNew = refinePsfClean(
+                            expW, psfW, res, badBitmask, P,
+                            dict(supportFrac=P["supportFrac"], sysFrac=P["sysFrac"],
+                                 poissonK=P["poissonK"]),
+                            nCycles=P["psfPolishCycles"])
+                    except Exception as e2:
+                        print(f"  residual-stack PSF refit failed ({type(e2).__name__}: {e2})")
+                        psfNew = psfW
         elif P["refitPsf"]:
             ks = P["psfKernelSizes"] or tuple([P["psfKernelSize"]] +
                                               [s for s in (27, 21, 15, 11) if s < P["psfKernelSize"]])

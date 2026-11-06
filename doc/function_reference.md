@@ -2,7 +2,7 @@
 
 Every public function and class of `lsst.meas.crowd`: what it does, its parameters (with types and defaults) and what it returns.  Generated from the docstrings by `doc/make_function_reference.py`; do not edit by hand (run `python doc/make_function_reference.py` after changing a docstring).  How the pipeline fits together is in [pipeline_guide.md](pipeline_guide.md); the output catalogue in [catalog_columns.md](catalog_columns.md).
 
-189 functions and 5 classes in 13 modules.  Everything listed here can be used as `crowd.<name>` after `import lsst.meas.crowd as crowd`, or from its module (`from lsst.meas.crowd import photometry`).  Names starting with `_` are internal helpers and are not listed.
+191 functions and 5 classes in 13 modules.  Everything listed here can be used as `crowd.<name>` after `import lsst.meas.crowd as crowd`, or from its module (`from lsst.meas.crowd import photometry`).  Names starting with `_` are internal helpers and are not listed.
 
 ## Start here
 
@@ -28,7 +28,7 @@ Every public function and class of `lsst.meas.crowd`: what it does, its paramete
 
 | Module | Role | Public functions / classes |
 | --- | --- | --- |
-| [`pipeline`](#pipeline) | the driver: run the pipeline on cutouts from Gaia starting positions, inner / outer loops, PSF refinement, diagnostics | 42 |
+| [`pipeline`](#pipeline) | the driver: run the pipeline on cutouts from Gaia starting positions, inner / outer loops, PSF refinement, diagnostics | 44 |
 | [`session`](#session) | load a visit, cut out regions, set up the PSF; configuration; saving runs | 19 |
 | [`gaiaCatalog`](#gaiacatalog) | the Gaia catalogue and the starting positions of each cutout | 4 |
 | [`photometry`](#photometry) | PSF and aperture photometry, errors, the Gaia comparison | 9 |
@@ -71,6 +71,8 @@ Adaptive, iterative joint PSF-fitting pipeline starting from Gaia positions.
 | [`tryElliptical`](#pipelinetryelliptical) | Try the elliptical-source test on one source of a finished run, printing every step. |
 | [`finalPositionPolish`](#pipelinefinalpositionpolish) | Re-optimise all source positions jointly. |
 | [`runInnerAdaptive`](#pipelineruninneradaptive) | Run one outer pass of the adaptive pipeline. |
+| [`psfStarImage`](#pipelinepsfstarimage) | Return the image with every source's model subtracted except the PSF stars ``idx``. |
+| [`refitPsfPiff`](#pipelinerefitpsfpiff) | Refit the PSF with PIFF (the Rubin pipelines' PSF determiner) on neighbour-subtracted stars. |
 | [`selectPsfStars`](#pipelineselectpsfstars) | Select clean, bright, isolated, unsaturated point sources for the PSF stack. |
 | [`refinePsfClean`](#pipelinerefinepsfclean) | Update the PSF from the residual stack of clean stars, cross-validated. |
 | [`refinePsfMedian`](#pipelinerefinepsfmedian) | Correct the PSF core with the median residual/flux of the bright clean stars. |
@@ -500,6 +502,47 @@ A warm fit of the current sources (Gaia starting positions or the previous pass)
 | Returns | Type | Description |
 | --- | --- | --- |
 | `result` | `dict` | Compatible with `fitLib.runInnerLoopVerbose`'s result (``modelFull``, ``residualFull``, ``peaks``, ``amps``, histories, ``snaps``), plus ``S``, ``brightCorr``, ``adaptive`` (the loop decisions), ``isGaia`` and ``gaiaIndex``. |
+
+### pipeline.psfStarImage
+
+`psfStarImage(exposure, fit, idx)`
+
+Return the image with every source's model subtracted except the PSF stars ``idx``.
+
+Each PSF star is left alone on (data - neighbours' models): the input for a standard PSF determiner in a crowded field.  The joint fit's own model is used (without the bright-star correction terms, which describe the PSF mismatch the new PSF should capture).
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `exposure` | `lsst.afw.image.Exposure` | The fitted exposure (not changed). |
+| `fit` | `dict` | Joint fit (`fitLib.jointPsfFitDiag`) of that exposure. |
+| `idx` | sequence [`int`] | The PSF stars (indices into the fit). |
+
+| Returns | Type | Description |
+| --- | --- | --- |
+| `image` | `numpy.ndarray` | The data minus the model, plus the PSF stars' models. |
+
+### pipeline.refitPsfPiff
+
+`refitPsfPiff(exposure, psf, res, P, point, verbose=True)`
+
+Refit the PSF with PIFF (the Rubin pipelines' PSF determiner) on neighbour-subtracted stars.
+
+The clean PSF stars of the pass (`selectPsfStars`) are left alone on an image with every other source's model subtracted (`psfStarImage`), turned into PSF candidates at their fitted positions (``MakePsfCandidatesTask``) and handed to ``PiffPsfDeterminerTask`` (``lsst.meas.extensions.piff``).  The wings beyond PIFF's stamp and the regularisation are applied afterwards, as for the other refits.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `exposure` | `lsst.afw.image.Exposure` | The fitted exposure of the pass. |
+| `psf` | `lsst.afw.detection.Psf` | The pass's PSF. |
+| `res` | `dict` | Result of `runInnerAdaptive`. |
+| `P` | `dict` | Pipeline options (``psfStack*`` for the star selection, ``piff*``). |
+| `point` | `lsst.geom.Point2D` | Where the PSF is evaluated (the cutout centre). |
+| `verbose` | `bool`, optional | Print what was done. |
+
+| Returns | Type | Description |
+| --- | --- | --- |
+| `psf` | `lsst.afw.detection.Psf` | The PIFF PSF. |
+
+Raises: `RuntimeError` (Too few PSF stars, or no usable candidates.)
 
 ### pipeline.selectPsfStars
 

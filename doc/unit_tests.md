@@ -4,7 +4,7 @@ Every unit test in `tests/`: what it checks, what it feeds in, and what it must 
 pass.  How to run them and read the results is in the
 [pipeline guide](pipeline_guide.md#unit-tests-running-them-and-checking-the-results).
 
-The suite has **135 tests in 13 files**.  Without the Rubin stack 133 run and the 2 in
+The suite has **140 tests in 15 files**.  Without the Rubin stack 138 run and the 2 in
 `test_fastStampsStack.py` are skipped; `testCxxEqualsNumpy` is also skipped if the C++ extension
 was not built, and the `test_sparseSolver.py` solver tests if it was built without the
 sparse solver.  `test_docstrings.py` checks that this page lists every test and that the
@@ -15,6 +15,8 @@ sparse solver.  `test_docstrings.py` checks that this page lists every test and 
 - [test_fastStampsStack.py](#test_faststampsstackpy): fast stamps against the stack
 - [test_sparseSolver.py](#test_sparsesolverpy): the sparse joint-fit solver (Eigen LSCG)
 - [test_speedups.py](#test_speedupspy): the sped-up steps give the original answers
+- [test_psfRefit.py](#test_psfrefitpy): the PIFF PSF refit's inputs
+- [test_cxx.py](#test_cxxpy): loading the C++ extension, stale builds
 - [test_photometry.py](#test_photometrypy): magnitudes, apertures, errors, Gaia comparison
 - [test_pipelineFunctions.py](#test_pipelinefunctionspy): the pipeline's building blocks
 - [test_diagnostics.py](#test_diagnosticspy): residual diagnostics and run-level plots
@@ -102,6 +104,26 @@ The sped-up steps give the same answers as the code they replace.
 | `CxxLoopsTestCase.testCentroidStepSameAsPython` | `_refineSubset`'s per-source loop in C++ (`refineCentroids`) | the same scene, three sources marked extended | the same sources move, to the same positions (1e-9 px) as `_refineSubsetPython` |
 | `SkyTermsTestCase.testRecoversPlaneAndFluxes` | `jointPsfFitDiag(skyTerms=3)`: a sky plane fitted with the fluxes | 120 stars on a sky of -9 counts tilted (+4 across x, -2 across y), true positions and PSF | plane within 0.3 of (-9, 4, -2), sky image within 0.4, fluxes unbiased (median ratio within 1 %, 90 % within 6 %); the Eigen and scipy solvers agree |
 | `SkyTermsTestCase.testFitSubtractsSky` | `pipeline._fit` with sky terms | the same scene | the image becomes data - fitted sky, the residual's median is < 1 count; the fast preset uses `skyTerms=3` |
+
+## test_psfRefit.py
+
+The PIFF PSF refit (`refitPsf="piff"`).  PIFF needs the Rubin stack, so a recording stand-in checks
+what it is given.
+
+| Test | What it checks | Input | Passes when |
+| --- | --- | --- | --- |
+| `PsfStarImageTestCase.testOnlyThePsfStarsRemain` | `psfStarImage`: every source's model subtracted except the PSF stars' | 40 Gaussian stars, 3 chosen as PSF stars | equal to data - model + the 3 stars' models; the input image unchanged |
+| `RefitPsfPiffWiringTestCase.test` | `refitPsfPiff` hands the stack's tasks the right inputs | the same scene, 14 PSF stars; PIFF, the candidate maker and the catalogue replaced by recording stand-ins | candidates at the fitted positions on the neighbour-subtracted image, 25 px stamps, spatial order 1, every candidate passed to PIFF; too few stars raises `RuntimeError` |
+
+## test_cxx.py
+
+Loading the C++ extension (`_cxx.load`).
+
+| Test | What it checks | Input | Passes when |
+| --- | --- | --- | --- |
+| `LoadTestCase.testCurrentBuild` | The built extension matches the code | the extension as built (skipped if not built) | its `API_VERSION` equals `_cxx.API_VERSION` and it has the sparse solver |
+| `LoadTestCase.testStaleBuildIsReported` | An extension built from older sources is not used silently | a module without `API_VERSION` (an old build) | `StaleExtensionError` naming the loaded file, the `_crowdLib*.so` files and how to rebuild |
+| `LoadTestCase.testMissingBuild` | No extension is not an error | the import fails | `load()` returns None (the NumPy / Python fallbacks are used) |
 
 ## test_photometry.py
 

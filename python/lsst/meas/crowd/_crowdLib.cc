@@ -285,6 +285,8 @@ py::dict pySolveSparseLeastSquares(std::size_t nRows, std::size_t nCols, I32Arra
 
 PYBIND11_MODULE(_crowdLib, mod) {
     mod.doc() = "Fast PSF-stamp kernels and the sparse joint-fit solver for lsst.meas.crowd";
+    // the interface version: must equal lsst.meas.crowd._cxx.API_VERSION (bump both together)
+    mod.attr("API_VERSION") = 3;
     mod.def("shiftImage", &pyShiftImage, "image"_a, "dx"_a, "dy"_a, "order"_a = 5);
     mod.def("taperStamp", &pyTaperStamp, "stamp"_a, "cx"_a, "cy"_a, "t0"_a, "t1"_a);
     mod.def("renderStamps", &pyRenderStamps, "kernel"_a, "xs"_a, "ys"_a, "order"_a = 5,
