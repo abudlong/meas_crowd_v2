@@ -4,7 +4,7 @@ Every unit test in `tests/`: what it checks, what it feeds in, and what it must 
 pass.  How to run them and read the results is in the
 [pipeline guide](pipeline_guide.md#unit-tests-running-them-and-checking-the-results).
 
-The suite has **132 tests in 13 files**.  Without the Rubin stack 130 run and the 2 in
+The suite has **135 tests in 13 files**.  Without the Rubin stack 133 run and the 2 in
 `test_fastStampsStack.py` are skipped; `testCxxEqualsNumpy` is also skipped if the C++ extension
 was not built, and the `test_sparseSolver.py` solver tests if it was built without the
 sparse solver.  `test_docstrings.py` checks that this page lists every test and that the
@@ -83,6 +83,7 @@ The sparse joint-fit solver (`sparseSolver.solveSparse`: pipe_crowd's Eigen
 | `SolveSparseTestCase.testEmptyColumnAndWarmStart` | A column without pixels; a warm start | 200 x 20 problem with an empty column; start at 1.1 x the answer | the empty column is 0; warm and cold starts agree to 1e-7 |
 | `SolveSparseTestCase.testCrowdedField` | A realistic joint fit | `makeCrowdedFieldProblem`: 250 sources in a 200 px image | chi2 no worse than `lsq_linear`'s; bright fluxes within 5 % of the truth |
 | `SolveSparseTestCase.testBadInput` | Shape checks | wrong-length b and x0 | `ValueError` |
+| `SolveSparseTestCase.testUnboundedColumns` | Columns exempt from x >= 0 (sky terms) | random 500 x 40 problem, last 3 columns unbounded | equal to scipy's exact `lsq_linear(method="bvls")` to 1e-8; the unbounded values negative, the rest >= 0 |
 | `PipelineSolverTestCase.testOption` | The `jointSolver` option | defaults, `_params`, `setJointSolver("lapack")` | default "eigen", accepted by `_params`, unknown name raises |
 | `PipelineSolverTestCase.testJointFitSameWithEverySolver` | `fitLib.jointPsfFitDiag` with each solver | 350 Gaussian stars of known flux in a 120 px image | one solve each, no fallback; "eigen" and "normal" fluxes and model equal "scipy"'s (to 1e-3 of the maximum), chi2 no worse |
 
@@ -99,6 +100,8 @@ The sped-up steps give the same answers as the code they replace.
 | `CxxLoopsTestCase.testStampBatchSameAsOneByOne` | `pipeline._psfStampBatchCached` (one rule query for all sources, misses rendered and cropped in C++) | 260 sources with size-rule crops, a constant PSF on the fast path | every stamp and box equal to `_psfStampCached`'s, one by one |
 | `CxxLoopsTestCase.testDesignMatrixAndModel` | `jointPsfFitDiag` with the C++ matrix / group / model loops (`buildDesignMatrix`, `accumulateModel`) | the same scene with bad pixels, solved from the same start | identical matrix, groups, group map, masks, fluxes and model to the Python loops; group chi2 to 1e-12 |
 | `CxxLoopsTestCase.testCentroidStepSameAsPython` | `_refineSubset`'s per-source loop in C++ (`refineCentroids`) | the same scene, three sources marked extended | the same sources move, to the same positions (1e-9 px) as `_refineSubsetPython` |
+| `SkyTermsTestCase.testRecoversPlaneAndFluxes` | `jointPsfFitDiag(skyTerms=3)`: a sky plane fitted with the fluxes | 120 stars on a sky of -9 counts tilted (+4 across x, -2 across y), true positions and PSF | plane within 0.3 of (-9, 4, -2), sky image within 0.4, fluxes unbiased (median ratio within 1 %, 90 % within 6 %); the Eigen and scipy solvers agree |
+| `SkyTermsTestCase.testFitSubtractsSky` | `pipeline._fit` with sky terms | the same scene | the image becomes data - fitted sky, the residual's median is < 1 count; the fast preset uses `skyTerms=3` |
 
 ## test_photometry.py
 

@@ -68,12 +68,14 @@ struct SparseSolveResult {
  * @param maxIter        LSCG iteration cap per solve (pipe_crowd uses 500)
  * @param maxActiveSet   cap on the number of LSCG solves of the active-set loop
  * @param kktTol         a fixed column is freed when A_j^T r > kktTol * ||A^T b||_inf
+ * @param unbounded      per column, non-zero = exempt from x >= 0 (e.g. sky terms); nullptr = none
  */
 SparseSolveResult solveSparseLeastSquares(std::size_t nRows, std::size_t nCols,
                                           std::int32_t const *indptr, std::int32_t const *indices,
                                           double const *values, double const *b, double const *x0,
                                           bool nonNegative, double tol, int maxIter,
-                                          int maxActiveSet, double kktTol);
+                                          int maxActiveSet, double kktTol,
+                                          std::uint8_t const *unbounded = nullptr);
 
 }  // namespace crowd
 }  // namespace meas

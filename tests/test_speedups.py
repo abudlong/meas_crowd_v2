@@ -335,5 +335,66 @@ class CxxLoopsTestCase(unittest.TestCase):
         np.testing.assert_allclose(new, ref, rtol=0, atol=1e-9)
 
 
+class SkyTermsTestCase(unittest.TestCase):
+    """The joint fit's sky terms (skyTerms=3) recover a background plane with the fluxes."""
+
+    def setUp(self):
+        self.n, sigma, half = 160, 1.8, 12
+        rng = np.random.default_rng(8)
+        self.xy = rng.uniform(10, 150, (120, 2))
+        self.flux = 10 ** rng.uniform(3.3, 4.5, len(self.xy))
+        self.stamp = _gaussStamp(sigma, half)
+        box = Box2I(Point2I(0, 0), Point2I(self.n - 1, self.n - 1))
+        model = np.zeros((self.n, self.n))
+        for (x, y), f in zip(self.xy, self.flux):
+            a, bb = self.stamp(None, x, y, box)
+            model[bb.getMinY():bb.getMaxY() + 1, bb.getMinX():bb.getMaxX() + 1] += f * a
+        yy, xx = np.mgrid[:self.n, :self.n]
+        self.sky = -9.0 + 4.0 * (xx - self.n / 2) / self.n - 2.0 * (yy - self.n / 2) / self.n
+        var = 100 + model
+        self.data = model + self.sky + rng.normal(size=model.shape) * np.sqrt(var)
+        self.var = var
+
+    def _fit(self, solver):
+        exp = lsstStubs.FakeExposure(self.data.copy(), self.var.copy())
+        pl.enableSpeedups()
+        pl.setJointSolver(solver)
+        pl._SOLVER["last"] = None
+        try:
+            with mock.patch.object(L, "psfStamp", self.stamp):
+                return exp, L.jointPsfFitDiag(exp, None, [tuple(p) for p in self.xy], 0, skyTerms=3)
+        finally:
+            pl.setJointSolver("eigen")
+            pl.disableSpeedups()
+
+    def testRecoversPlaneAndFluxes(self):
+        exp, fit = self._fit("eigen")
+        np.testing.assert_allclose(fit["sky"], [-9.0, 4.0, -2.0], atol=0.3)
+        np.testing.assert_allclose(fit["skyImage"], self.sky, atol=0.4)
+        ratio = fit["amps"] / self.flux                            # no flux bias from the sky
+        self.assertLess(abs(np.median(ratio) - 1), 0.01)
+        self.assertLess(np.percentile(np.abs(ratio - 1), 90), 0.06)
+        _, ref = self._fit("scipy")                                # scipy's bounded solver
+        np.testing.assert_allclose(fit["sky"], ref["sky"], atol=1e-3)
+        np.testing.assert_allclose(fit["amps"], ref["amps"], rtol=1e-4, atol=1e-2)
+
+    def testFitSubtractsSky(self):
+        """`pipeline._fit` leaves background-subtracted data and a sources-only model."""
+        exp = lsstStubs.FakeExposure(self.data.copy(), self.var.copy())
+        S = pl._state(self.xy)
+        pl.enableSpeedups()
+        pl._SOLVER["last"] = None
+        try:
+            with mock.patch.object(L, "psfStamp", self.stamp):
+                fit = pl._fit(exp, None, S, 0, None, dict(skyTerms=3))
+        finally:
+            pl.disableSpeedups()
+        np.testing.assert_allclose(exp.image.array, self.data - fit["skyImage"], atol=1e-4)
+        resid = exp.image.array - fit["modelFull"]
+        self.assertLess(abs(np.median(resid)), 1.0)
+        self.assertEqual(pl._params(__import__("lsst.meas.crowd.session", fromlist=["x"]).makeConfig(
+            __import__("lsst.meas.crowd.session", fromlist=["x"]).FAST_STELLAR_FIELD_CONFIG))["skyTerms"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2574,7 +2574,7 @@ Result of `solveSparse`.
 
 ### sparseSolver.solveSparse
 
-`solveSparse(A, b, nonNegative=True, x0=None, tol=1e-08, maxIter=5000, maxActiveSet=50, kktTol=1e-06)`
+`solveSparse(A, b, nonNegative=True, x0=None, tol=1e-08, maxIter=5000, maxActiveSet=50, kktTol=1e-06, unbounded=None)`
 
 Solve ``min ||A x - b||^2`` (optionally with ``x >= 0``) with Eigen's sparse LSCG.
 
@@ -2588,6 +2588,7 @@ Solve ``min ||A x - b||^2`` (optionally with ``x >= 0``) with Eigen's sparse LSC
 | `maxIter` | `int`, optional | LSCG iteration cap per solve (pipe_crowd uses 500). |
 | `maxActiveSet` | `int`, optional | Cap on the number of LSCG solves in the active-set loop. |
 | `kktTol` | `float`, optional | A column held at zero is freed when its gradient exceeds this fraction of ``max \|A^T b\|``. |
+| `unbounded` | `numpy.ndarray` [`bool`], optional | Columns exempt from the ``x >= 0`` bound (e.g. sky terms); None = all bounded. |
 
 | Returns | Type | Description |
 | --- | --- | --- |
@@ -3403,7 +3404,7 @@ Assign each source on the pages a colour from ``SRC_PALETTE``.
 
 ### fitLib.jointPsfFitDiag
 
-`jointPsfFitDiag(exposure, psf, peakPositions, badBitmask, ampZeroTol=1e-06, supportFrac=0.01, varModel=None, sysFrac=0.03, poissonK=0.0)`
+`jointPsfFitDiag(exposure, psf, peakPositions, badBitmask, ampZeroTol=1e-06, supportFrac=0.01, varModel=None, sysFrac=0.03, poissonK=0.0, skyTerms=0)`
 
 Fit all PSF amplitudes in one non-negative solve, keeping what is needed for diagnostics.
 
@@ -3420,6 +3421,7 @@ Weighted, non-negative, one sparse solve against the original exposure.  PSF sta
 | `varModel` | `numpy.ndarray`, optional | Model image used for the model-dependent variance terms (see `effectiveVariance`). |
 | `sysFrac` | `float`, optional | Fractional model error added to the variance. |
 | `poissonK` | `float`, optional | Extra variance per unit model flux. |
+| `skyTerms` | `int`, optional | Fit a sky background together with the fluxes: 0 none, 1 a constant, 3 a tilted plane (a + b x + c y, x and y scaled to the image size and centred).  The sky terms may be negative.  The sky is part of ``modelFull`` and returned as ``sky`` (coefficients) and ``skyImage``. |
 
 | Returns | Type | Description |
 | --- | --- | --- |

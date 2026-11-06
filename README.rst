@@ -300,7 +300,9 @@ Fast mode and parallel tiles
 ``FAST_STELLAR_FIELD_CONFIG`` (``crowdDetector.py fit --config fast``) is
 ``CROWDED_STELLAR_FIELD_CONFIG`` cut down for speed: one pass with the visit PSF and background as
 given, detection at 5 sigma then straight to 3 sigma, at most 4 inner iterations, bright-star
-terms kept, and the end-of-pass tests, shape cut and noise / PSF-error checks off.  On one
+terms kept, and the end-of-pass tests, shape cut and noise / PSF-error checks off.  As it makes no
+background refit between passes, every joint fit also fits a tilted sky plane together with the
+fluxes (``skyTerms=3``; the sparse solver leaves those terms free to go negative).  On one
 LSSTCam tile it took 12.8 s instead of 141 s, recovered 91 % of the full run's S/N > 20 sources,
 and measured them 0.10 mag fainter (the full run refines the PSF wings) with 0.07 mag scatter.
 ``fitTiles(..., nJobs=N)`` (``--n-jobs``) fits N tiles at once in worker processes.

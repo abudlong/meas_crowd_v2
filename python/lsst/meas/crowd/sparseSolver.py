@@ -83,7 +83,7 @@ class SparseSolveResult:
 
 
 def solveSparse(A, b, nonNegative=True, x0=None, tol=1e-8, maxIter=5000, maxActiveSet=50,
-                kktTol=1e-6):
+                kktTol=1e-6, unbounded=None):
     """Solve ``min ||A x - b||^2`` (optionally with ``x >= 0``) with Eigen's sparse LSCG.
 
     Parameters
@@ -105,6 +105,8 @@ def solveSparse(A, b, nonNegative=True, x0=None, tol=1e-8, maxIter=5000, maxActi
     kktTol : `float`, optional
         A column held at zero is freed when its gradient exceeds this fraction of
         ``max |A^T b|``.
+    unbounded : `numpy.ndarray` [`bool`], optional
+        Columns exempt from the ``x >= 0`` bound (e.g. sky terms); None = all bounded.
 
     Returns
     -------
@@ -130,7 +132,8 @@ def solveSparse(A, b, nonNegative=True, x0=None, tol=1e-8, maxIter=5000, maxActi
     res = _solve(nRows, nCols, A.indptr.astype(np.int32, copy=False),
                  A.indices.astype(np.int32, copy=False),
                  np.ascontiguousarray(A.data, dtype=float), b, x0, bool(nonNegative),
-                 float(tol), int(maxIter), int(maxActiveSet), float(kktTol))
+                 float(tol), int(maxIter), int(maxActiveSet), float(kktTol),
+                 None if unbounded is None else np.ascontiguousarray(unbounded, dtype=np.uint8))
     return SparseSolveResult(**res)
 
 

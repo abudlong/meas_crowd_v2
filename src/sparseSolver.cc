@@ -71,7 +71,9 @@ SparseSolveResult solveSparseLeastSquares(std::size_t nRows, std::size_t nCols,
                                           std::int32_t const *indptr, std::int32_t const *indices,
                                           double const *values, double const *b, double const *x0,
                                           bool nonNegative, double tol, int maxIter,
-                                          int maxActiveSet, double kktTol) {
+                                          int maxActiveSet, double kktTol,
+                                          std::uint8_t const *unbounded) {
+    auto bounded = [&](std::size_t j) { return nonNegative && !(unbounded && unbounded[j]); };
     SparseSolveResult out;
     out.x.assign(nCols, 0.0);
     if (nCols == 0) {
@@ -93,7 +95,7 @@ SparseSolveResult solveSparseLeastSquares(std::size_t nRows, std::size_t nCols,
     for (std::size_t j = 0; j < nCols; ++j) {
         if (!usable[j]) continue;
         double const v = x0 ? x0[j] : 0.0;
-        x[j] = (nonNegative && v < 0.0) ? 0.0 : v;
+        x[j] = (bounded(j) && v < 0.0) ? 0.0 : v;
         isFree[j] = 1;
     }
 
@@ -134,7 +136,7 @@ SparseSolveResult solveSparseLeastSquares(std::size_t nRows, std::size_t nCols,
 
             bool anyNegative = false;
             for (std::size_t c = 0; c < cols.size(); ++c) {
-                if (nonNegative && z[c] < 0.0) {
+                if (bounded(static_cast<std::size_t>(cols[c])) && z[c] < 0.0) {
                     x[cols[c]] = 0.0;
                     isFree[cols[c]] = 0;
                     anyNegative = true;

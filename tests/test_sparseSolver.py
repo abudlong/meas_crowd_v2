@@ -89,6 +89,21 @@ class SolveSparseTestCase(unittest.TestCase):
         bright = truth > 20 * np.median(truth)
         np.testing.assert_allclose(r.x[bright], truth[bright], rtol=0.05)
 
+    def testUnboundedColumns(self):
+        """Columns marked unbounded may go negative; the rest stay >= 0 (scipy's exact BVLS)."""
+        rng = np.random.default_rng(6)
+        A = sp.random(500, 40, density=0.2, random_state=1, format="csc")
+        b = rng.normal(size=500) - 0.5
+        free = np.zeros(40, bool)
+        free[-3:] = True
+        r = ss.solveSparse(A, b, unbounded=free)
+        ref = lsq_linear(A.toarray(), b, bounds=(np.where(free, -np.inf, 0.0), np.inf),
+                         method="bvls").x
+        self.assertTrue(r.converged)
+        self.assertTrue((r.x[free] < 0).all())
+        self.assertGreaterEqual(r.x[~free].min(), 0.0)
+        np.testing.assert_allclose(r.x, ref, atol=1e-8)
+
     def testBadInput(self):
         A = sp.random(20, 5, density=0.5, random_state=0, format="csc")
         with self.assertRaises(ValueError):

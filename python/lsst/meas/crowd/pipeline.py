@@ -163,6 +163,9 @@ PIPELINE_DEFAULTS = dict(
     wingMinSnr=300.0,        #   radial profiles (unsaturated stars with peak S/N >= this set
                                #   the shape; saturated stars extend it outwards) instead of
                                #   extrapolating the kernel's noisy 6-14 px profile
+    skyTerms=0,               # fit a sky background in every joint fit, together with the fluxes:
+                               #   0 none, 1 a constant, 3 a tilted plane; the fitted sky is
+                               #   subtracted from the working image after each fit
     bgMode="plane",           # background refit between passes: "plane" (tilted plane, sigma-clipped),
                                #   "constant", "spline" (SubtractBackgroundTask surface on bgBinSize
                                #   bins -- can swing by 100s of counts in the corners of a small,
@@ -763,12 +766,12 @@ def _warmStart(n):
     Only the starting point of the iterative solve changes, not its answer.
     """
     cur, last = _SOLVER.get("positions"), _SOLVER.get("last")
-    if cur is None or last is None or len(cur[0]) != n or cur[1] != last[2] or not len(last[0]):
+    if cur is None or last is None or len(cur[0]) > n or cur[1] != last[2] or not len(last[0]):
         return None
     d, k = cKDTree(last[0]).query(cur[0], distance_upper_bound=0.5)
     ok = np.isfinite(d)
-    x0 = np.zeros(n)
-    x0[ok] = np.clip(last[1][k[ok]], 0.0, None)
+    x0 = np.zeros(n)                       # columns after the sources (sky terms) start at 0
+    x0[:len(cur[0])][ok] = np.clip(last[1][k[ok]], 0.0, None)
     return x0
 
 
@@ -784,6 +787,23 @@ def _jointFitWarm(exposure, psf, peakPositions, badBitmask, **kw):
     return fit
 
 
+def _unboundedColumns(bounds, n):
+    """Classify lsq_linear bounds: x >= 0 or free per column (lower bound 0 or -inf, no upper
+    bound) -> the mask of free columns (all False: plain non-negative); anything else -> None."""
+    try:
+        lb, ub = bounds
+        lb = np.broadcast_to(np.asarray(lb, dtype=float), (n,))
+        ub = np.broadcast_to(np.asarray(ub, dtype=float), (n,))
+    except (TypeError, ValueError):
+        return None
+    if not np.all(np.isposinf(ub)):
+        return None
+    free = np.isneginf(lb)
+    if not np.all((lb == 0) | free):
+        return None
+    return free
+
+
 def _lsqLinearEigen(A, b, bounds, **kw):
     """Solve a joint fit with the sparse Eigen LSCG solver; "normal" path if it cannot."""
     from scipy.optimize import OptimizeResult
@@ -794,8 +814,10 @@ def _lsqLinearEigen(A, b, bounds, **kw):
                   "rebuild with scons or setup.py) -- using jointSolver='normal'")
             _SOLVER["warned"] = True
         return _lsqLinearNormal(A, b, bounds, **kw)
+    free = _unboundedColumns(bounds, A.shape[1])
     r = solveSparse(A, b, nonNegative=True, x0=_warmStart(A.shape[1]), tol=_SOLVER["tol"],
-                    maxIter=_SOLVER["maxIter"], maxActiveSet=_SOLVER["maxActiveSet"])
+                    maxIter=_SOLVER["maxIter"], maxActiveSet=_SOLVER["maxActiveSet"],
+                    unbounded=free if free is not None and free.any() else None)
     _SOLVER["stats"]["cgIterations"] += r.cgIterations
     if not r.converged:
         _SOLVER["stats"]["fallbacks"] += 1
@@ -814,17 +836,14 @@ def _lsqLinearFast(A, b, bounds=(-np.inf, np.inf), **kw):
     other than a sparse, non-negative problem goes to scipy's lsq_linear unchanged.
     """
     from scipy.sparse import issparse
-    try:
-        isNonneg = tuple(bounds) == (0, np.inf)
-    except Exception:
-        isNonneg = False
-    if not issparse(A) or not isNonneg:
+    free = _unboundedColumns(bounds, A.shape[1]) if issparse(A) else None
+    if free is None:                       # not a (partly) non-negative sparse problem
         return _ORIG["lsq_linear"](A, b, bounds=bounds, **kw)
     t0 = time.perf_counter()
     try:
         if _SOLVER["name"] == "eigen":
             return _lsqLinearEigen(A, b, bounds, **kw)
-        if _SOLVER["name"] == "scipy":
+        if _SOLVER["name"] == "scipy" or free.any():   # the "normal" NNLS has no free columns
             return _ORIG["lsq_linear"](A, b, bounds=bounds, **kw)
         return _lsqLinearNormal(A, b, bounds, **kw)
     finally:
@@ -1106,9 +1125,19 @@ def estimateGaiaOffset(exposure, S, fwhm, badBitmask, noise, minPeakSnr=20.0,
 # Index-preserving versions of the cleaning steps (Gaia sources protected)
 # =====================================================================
 def _fit(exposure, psf, S, badBitmask, varModel, fitkw):
-    """Run the joint fit of the source state's positions (extended sources broadened)."""
+    """Run the joint fit of the source state's positions (extended sources broadened).
+
+    With ``fitkw["skyTerms"]``, the sky fitted together with the fluxes is subtracted from the
+    exposure's image (in place) and from the model, so everything after sees background-subtracted
+    data and a sources-only model.
+    """
     _setExtRule(S)
-    return L.jointPsfFitDiag(exposure, psf, _xy(S), badBitmask, varModel=varModel, **fitkw)
+    fit = L.jointPsfFitDiag(exposure, psf, _xy(S), badBitmask, varModel=varModel, **fitkw)
+    if fit.get("skyImage") is not None:
+        img = exposure.image.array
+        img -= fit["skyImage"].astype(img.dtype)
+        fit["modelFull"] = fit["modelFull"] - fit["skyImage"]
+    return fit
 
 
 def _refineSubset(exposure, psf, S, fit, idx, maxShift, minAmp, freezeSep, psfSigma):
@@ -2554,6 +2583,8 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
     psfPeak = psf.computeKernelImage(bbox.getCenter()).array.max()
     noise = float(np.sqrt(np.nanmedian(exposure.variance.array)))
     fitkw = dict(supportFrac=P["supportFrac"], sysFrac=P["sysFrac"], poissonK=P["poissonK"])
+    if P["skyTerms"]:
+        fitkw["skyTerms"] = int(P["skyTerms"])
     target = float(P["targetSnr"] if P["targetSnr"] is not None else P["minSnr"])
     tFloor, thrMin, step = P["tFloor"], P["thresholdMin"], P["thresholdStep"]
     thr = float(thresholdStart if thresholdStart is not None else P["thresholdStart"])

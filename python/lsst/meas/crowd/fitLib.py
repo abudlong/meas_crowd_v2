@@ -2670,7 +2670,7 @@ def _frameAxes(ax, color, lw=3.0):
 
 def jointPsfFitDiag(exposure, psf, peakPositions, badBitmask,
                        ampZeroTol=1e-6, supportFrac=0.01,
-                       varModel=None, sysFrac=0.03, poissonK=0.0):
+                       varModel=None, sysFrac=0.03, poissonK=0.0, skyTerms=0):
     """Fit all PSF amplitudes in one non-negative solve, keeping what is needed for diagnostics.
 
     Weighted, non-negative, one sparse solve against the original exposure.  PSF stamps are not
@@ -2696,6 +2696,11 @@ def jointPsfFitDiag(exposure, psf, peakPositions, badBitmask,
         Fractional model error added to the variance.
     poissonK : `float`, optional
         Extra variance per unit model flux.
+    skyTerms : `int`, optional
+        Fit a sky background together with the fluxes: 0 none, 1 a constant, 3 a tilted plane
+        (a + b x + c y, x and y scaled to the image size and centred).  The sky terms may be
+        negative.  The sky is part of ``modelFull`` and returned as ``sky`` (coefficients) and
+        ``skyImage``.
 
     Returns
     -------
@@ -2744,11 +2749,23 @@ def jointPsfFitDiag(exposure, psf, peakPositions, badBitmask,
                                                          supportFrac)
     Aw.has_sorted_indices = True
     dw = dVec * sqrtW
+    skyTerms = int(skyTerms or 0)
+    if skyTerms not in (0, 1, 3):
+        raise ValueError(f"skyTerms must be 0, 1 or 3, not {skyTerms}")
+    if skyTerms:                  # sky columns (constant, x, y) over the good pixels, after the sources
+        from scipy.sparse import hstack as _hstack
+        gy, gx = np.divmod(flat, nx)
+        basis = [np.ones(nPix), (gx - nx / 2) / max(nx, 1), (gy - ny / 2) / max(ny, 1)][:skyTerms]
+        Afit = _hstack([Aw, csc_matrix(np.column_stack([b_ * sqrtW for b_ in basis]))], format="csc")
+        lb = np.concatenate([np.zeros(nSrc), np.full(skyTerms, -np.inf)])
+    else:
+        Afit, lb = Aw, 0
     timings['joint fit: build A'] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    res = lsq_linear(Aw, dw, bounds=(0, np.inf), method='trf', lsmr_tol='auto', max_iter=2000)
-    amps = res.x
+    res = lsq_linear(Afit, dw, bounds=(lb, np.inf), method='trf', lsmr_tol='auto', max_iter=2000)
+    amps = res.x[:nSrc]
+    sky = np.asarray(res.x[nSrc:], float)
     timings['joint fit: lsq_linear'] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -2770,6 +2787,14 @@ def jointPsfFitDiag(exposure, psf, peakPositions, badBitmask,
                 sub = groupMap[c['ys'], c['xs']]
                 sub[c['sig']] = labels[k]
 
+    skyImage = None
+    if skyTerms:
+        yyI, xxI = np.mgrid[:ny, :nx]
+        skyImage = np.full((ny, nx), sky[0])
+        if skyTerms > 1:
+            skyImage += sky[1] * (xxI - nx / 2) / max(nx, 1) + sky[2] * (yyI - ny / 2) / max(ny, 1)
+        modelFull = modelFull + skyImage
+
     resid = data - modelFull
     chi2map = np.zeros((ny, nx))
     chi2map[good] = resid[good] ** 2 / variance[good]
@@ -2785,7 +2810,7 @@ def jointPsfFitDiag(exposure, psf, peakPositions, badBitmask,
                 comps=comps, groupLabels=labels, nGroups=nGroups, groupMap=groupMap,
                 groupChi2=groupChi2, good=good, chi2map=chi2map, timings=timings,
                 lsqStatus=res.status, lsqNit=res.nit, lsqCost=res.cost,
-                variance=variance, Aw=Aw)
+                variance=variance, Aw=Aw, sky=sky, skyImage=skyImage)
 
 
 def _designMatrixPython(stamps, pixelIndex, sqrtW, X0, Y0, nPix, supportFrac):

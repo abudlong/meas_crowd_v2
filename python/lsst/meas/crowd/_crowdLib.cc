@@ -238,7 +238,7 @@ py::tuple pyRenderDerivativesWindow(Array const &kernel, double x, double y, int
 py::dict pySolveSparseLeastSquares(std::size_t nRows, std::size_t nCols, I32Array const &indptr,
                                    I32Array const &indices, Array const &data, Array const &b,
                                    py::object const &x0, bool nonNegative, double tol, int maxIter,
-                                   int maxActiveSet, double kktTol) {
+                                   int maxActiveSet, double kktTol, py::object const &unbounded) {
     if (static_cast<std::size_t>(indptr.size()) != nCols + 1)
         throw std::invalid_argument("indptr must have nCols + 1 entries");
     std::size_t const nnz = static_cast<std::size_t>(indptr.data()[nCols]);
@@ -254,12 +254,20 @@ py::dict pySolveSparseLeastSquares(std::size_t nRows, std::size_t nCols, I32Arra
             throw std::invalid_argument("x0 must have nCols entries");
         x0p = guess.data();
     }
+    py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast> unb;
+    std::uint8_t const *unbp = nullptr;
+    if (!unbounded.is_none()) {
+        unb = py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast>::ensure(unbounded);
+        if (!unb || static_cast<std::size_t>(unb.size()) != nCols)
+            throw std::invalid_argument("unbounded must have nCols entries");
+        unbp = unb.data();
+    }
     SparseSolveResult res;
     {
         py::gil_scoped_release release;
         res = solveSparseLeastSquares(nRows, nCols, indptr.data(), indices.data(), data.data(),
                                       b.data(), x0p, nonNegative, tol, maxIter, maxActiveSet,
-                                      kktTol);
+                                      kktTol, unbp);
     }
     Array x(nCols);
     std::copy(res.x.begin(), res.x.end(), x.mutable_data());
@@ -297,6 +305,7 @@ PYBIND11_MODULE(_crowdLib, mod) {
     mod.def("solveSparseLeastSquares", &pySolveSparseLeastSquares, "nRows"_a, "nCols"_a,
             "indptr"_a, "indices"_a, "data"_a, "b"_a, "x0"_a = py::none(), "nonNegative"_a = true,
             "tol"_a = 1e-8, "maxIter"_a = 5000, "maxActiveSet"_a = 50, "kktTol"_a = 1e-6,
+            "unbounded"_a = py::none(),
             "Sparse (non-negative) least squares: Eigen LeastSquaresConjugateGradient, as in "
             "pipe_crowd, inside an active-set loop for x >= 0.  A is given in CSC form.");
 }
