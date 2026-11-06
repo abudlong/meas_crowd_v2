@@ -73,7 +73,7 @@ _API = {
     "stagePlots": ["psfStarPositions", "showPsfStars", "showBackgrounds", "showRounds",
                    "showLinkedSourcePages", "comparePasses"],
     "session": ["makeConfig", "prepareSession", "CROWDED_FIELD_CONFIG", "V5_TESTING_CONFIG",
-                "CROWDED_STELLAR_FIELD_CONFIG", "robustStats",
+                "CROWDED_STELLAR_FIELD_CONFIG", "FAST_STELLAR_FIELD_CONFIG", "robustStats",
                 "saveRun", "Session", "CutoutRun"],
     "fastKernels": ["FastPsf", "HAVE_CXX"],
     "sparseSolver": ["solveSparse", "HAVE_SPARSE_SOLVER", "makeCrowdedFieldProblem",

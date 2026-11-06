@@ -370,7 +370,8 @@ def fitTiles(visit, detector, config=None, outDir="detector_run", tile=400, pad=
                        instrument, visitImageCollections)
     attachGaia(sess, cacheDir=os.path.join(outDir, "gaia_cache"),
                **({"repo": repo} if repo else {}))
-    kw = dict(maxOuter=3, maxInner=15, psfPolishCycles=3)
+    # defaults for settings the configuration does not make itself (the fast preset sets maxOuter)
+    kw = {k: v for k, v in dict(maxOuter=3, maxInner=15, psfPolishCycles=3).items() if k not in cfg}
     kw.update(overrides)
     _TILE.clear()
     _TILE.update(sess=sess, cfg=cfg, kw=kw, paths=paths, plotNames=plotNames, plotDir=plotDir,

@@ -37,12 +37,14 @@ __all__ = ["HAVE_CXX", "lanczosWeights", "shiftImage", "taperStamp", "renderStam
 
 import numpy as np
 
-try:
-    from . import _crowdLib as _lib
+try:                                    # by name, not through the package's lazy loader
+    import importlib as _importlib
+    _lib = _importlib.import_module("lsst.meas.crowd._crowdLib")
     HAVE_CXX = True
 except ImportError:                     # extension not built: NumPy fallback
     _lib = None
     HAVE_CXX = False
+_HAVE_WINDOW = HAVE_CXX and hasattr(_lib, "renderDerivativesWindow")   # older builds lack it
 
 
 def lanczosWeights(frac, order=5):
@@ -309,8 +311,22 @@ class FastPsf:
         box : `tuple` [`int`, `int`, `int`, `int`] or `None`
             Their box (xmin, ymin, xmax, ymax).
         """
-        dx, dy, x0, y0 = renderDerivatives(self.kernel, [x], [y], eps, self.order)
         ny, nx = self.kernel.shape
+        if _HAVE_WINDOW:
+            # only the part inside the clip box is rendered (identical values); worth it when
+            # the clip box is much smaller than the stamp (e.g. a centroid fit's core window)
+            x0 = int(np.floor(x + 0.5)) - nx // 2
+            y0 = int(np.floor(y + 0.5)) - ny // 2
+            c = self._clip(x0, y0, ny, nx, clip)
+            if c is None:
+                return None, None, None
+            sy, sx, box = c
+            if (sy.stop - sy.start) * (sx.stop - sx.start) < 0.5 * ny * nx:
+                dx, dy = _lib.renderDerivativesWindow(self.kernel, float(x), float(y), self.order,
+                                                      float(eps), sy.start, sy.stop, sx.start,
+                                                      sx.stop)
+                return dx, dy, box
+        dx, dy, x0, y0 = renderDerivatives(self.kernel, [x], [y], eps, self.order)
         c = self._clip(int(x0[0]), int(y0[0]), ny, nx, clip)
         if c is None:
             return None, None, None

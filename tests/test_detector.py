@@ -211,6 +211,25 @@ class FitStitchTestCase(unittest.TestCase):
         np.testing.assert_array_equal(par["tile"], ser["tile"])
         self.assertEqual(len(par["catalog"]), len(ser["catalog"]))
 
+    def testConfigSettingsNotOverridden(self):
+        """fitTiles' maxOuter / maxInner defaults apply only where the configuration is silent."""
+        seen = []
+        good = self.syn.runSessionGaia
+
+        def spy(sess, cfg, names=None, **kw):
+            seen.append(kw)
+            return good(sess, cfg, names=names, **kw)
+
+        with mock.patch.object(pipeline, "runSessionGaia", spy):
+            det.fitTiles(1, 2, config=dict(maxOuter=1), outDir=self.out, tile=200, pad=20,
+                         visitImage=self.syn.visitImage, region=(0, 150, 0, 150))
+            self.assertNotIn("maxOuter", seen[-1])              # the configuration's 1 is used
+            self.assertEqual(seen[-1]["maxInner"], 15)
+            det.fitTiles(1, 2, config=dict(maxOuter=1), outDir=self.out, tile=200, pad=20,
+                         visitImage=self.syn.visitImage, region=(0, 150, 0, 150), overwrite=True,
+                         maxOuter=2)
+            self.assertEqual(seen[-1]["maxOuter"], 2)           # an explicit override wins
+
     def testPlot(self):
         self._fit()
         m = det.stitchTiles(self.out, verbose=False)

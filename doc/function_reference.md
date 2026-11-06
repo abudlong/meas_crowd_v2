@@ -2,7 +2,7 @@
 
 Every public function and class of `lsst.meas.crowd`: what it does, its parameters (with types and defaults) and what it returns.  Generated from the docstrings by `doc/make_function_reference.py`; do not edit by hand (run `python doc/make_function_reference.py` after changing a docstring).  How the pipeline fits together is in [pipeline_guide.md](pipeline_guide.md); the output catalogue in [catalog_columns.md](catalog_columns.md).
 
-186 functions and 5 classes in 13 modules.  Everything listed here can be used as `crowd.<name>` after `import lsst.meas.crowd as crowd`, or from its module (`from lsst.meas.crowd import photometry`).  Names starting with `_` are internal helpers and are not listed.
+187 functions and 5 classes in 13 modules.  Everything listed here can be used as `crowd.<name>` after `import lsst.meas.crowd as crowd`, or from its module (`from lsst.meas.crowd import photometry`).  Names starting with `_` are internal helpers and are not listed.
 
 ## Start here
 
@@ -39,7 +39,7 @@ Every public function and class of `lsst.meas.crowd`: what it does, its paramete
 | [`runPlots`](#runplots) | write every plot of a run, of the detector-level PSF, or of chosen tiles | 4 |
 | [`fastKernels`](#fastkernels) | fast PSF stamps (C++ with a NumPy fallback) | 6 |
 | [`sparseSolver`](#sparsesolver) | the sparse joint-fit solver: pipe_crowd's Eigen LSCG with an x >= 0 active set | 4 |
-| [`fitLib`](#fitlib) | the core library: joint fit, detection, PSF and background tools, plots | 68 |
+| [`fitLib`](#fitlib) | the core library: joint fit, detection, PSF and background tools, plots | 69 |
 | [`adaptive`](#adaptive) | the residual check deciding whether sources are still missing | 7 |
 
 ## pipeline
@@ -2645,6 +2645,7 @@ Crowded-field iterative joint PSF fitting: the core library.
 | [`selectSourcePages`](#fitlibselectsourcepages) | Choose the sources that get per-source pages. |
 | [`sourceColors`](#fitlibsourcecolors) | Assign each source on the pages a colour from ``SRC_PALETTE``. |
 | [`jointPsfFitDiag`](#fitlibjointpsffitdiag) | Fit all PSF amplitudes in one non-negative solve, keeping what is needed for diagnostics. |
+| [`psfStampBatch`](#fitlibpsfstampbatch) | Render the PSF stamps of many sources (`psfStamp` for each). |
 | [`computePsfDerivatives`](#fitlibcomputepsfderivatives) | Compute central-difference derivative stamps dP/dx and dP/dy. |
 | [`windowedCentroid`](#fitlibwindowedcentroid) | Return the flux-weighted centroid in a box around (x, y). |
 | [`refinePeakPositions`](#fitlibrefinepeakpositions) | Move each well-detected source towards the position that minimises its residual. |
@@ -3388,6 +3389,23 @@ Weighted, non-negative, one sparse solve against the original exposure.  PSF sta
 | Returns | Type | Description |
 | --- | --- | --- |
 | `fit` | `dict` | ``amps``, ``modelFull``, ``nAtZero``; ``comps`` (per source a dict with ``stamp``, ``sig`` (significant support), ``ys``/``xs`` (slices of its fit region), ``amp``, ``bboxParent``, or None if the stamp misses the image); coupled-source groups (``groupLabels``, ``nGroups``, ``groupMap``, ``groupChi2``); ``good`` (pixels used), ``chi2map``, ``variance`` (the effective variance), ``timings`` and the solver status (``lsqStatus``, ``lsqNit``, ``lsqCost``). |
+
+### fitLib.psfStampBatch
+
+`psfStampBatch(psf, positions, clipBbox, taper=None)`
+
+Render the PSF stamps of many sources (`psfStamp` for each).
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `psf` | `lsst.afw.detection.Psf` | PSF model. |
+| `positions` | sequence of (x, y) | Positions in parent pixel coordinates. |
+| `clipBbox` | `lsst.geom.Box2I` | Box to clip the stamps to. |
+| `taper` | `tuple` [`float`, `float`], optional | Wing taper (see `psfStamp`). |
+
+| Returns | Type | Description |
+| --- | --- | --- |
+| `stamps` | `list` [`tuple`] | Per position ``(stamp, (xmin, ymin, xmax, ymax))``, or ``(None, None)`` if the stamp misses ``clipBbox``. |
 
 ### fitLib.computePsfDerivatives
 

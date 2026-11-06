@@ -70,7 +70,8 @@ The package follows the Rubin DM layout (``sconsUtils`` + ``eups``)::
 
     SConstruct, ups/              build / eups configuration
     include/lsst/meas/crowd/      C++ headers
-    src/                          C++ sources (lib/libmeas_crowd)
+    src/                          C++ sources (lib/libmeas_crowd): stamps, sparse solver,
+                                  joint-fit matrix / model, centroid steps
     python/lsst/meas/crowd/
         __init__.py               public API (submodules load on first use)
         pipeline.py               driver: runSessionGaia, inner / outer loops, PSF refinement
@@ -92,7 +93,8 @@ The package follows the Rubin DM layout (``sconsUtils`` + ``eups``)::
     examples/                     run_visit.py (notebook cells), run_visit_batch.py (terminal),
                                   usdf_job.sh, usdf_detector_array.sh (Slurm), benchmark_stamps.py,
                                   benchmark_solver.py, run_eigen_solver.ipynb (a run with the new
-                                  solver), compare_solvers.ipynb (old vs new solver)
+                                  solver), compare_solvers.ipynb (old vs new solver),
+                                  run_detector_fast.ipynb (whole detector, fast mode, timed)
     doc/                          user guide, algorithm, function reference, catalogue, unit tests,
                                   command-line runs
 
@@ -291,6 +293,24 @@ only used after checking, for each PSF, that it reproduces ``psf.computeImage`` 
 peak; otherwise the pipeline falls back and says so in the log.  ``nJobs=`` in
 ``runSessionGaia`` fits several cutouts in parallel, and a detector run spreads its tiles over a
 Slurm array.
+
+Fast mode and parallel tiles
+----------------------------
+
+``FAST_STELLAR_FIELD_CONFIG`` (``crowdDetector.py fit --config fast``) is
+``CROWDED_STELLAR_FIELD_CONFIG`` cut down for speed: one pass with the visit PSF and background as
+given, detection at 5 sigma then straight to 3 sigma, at most 4 inner iterations, bright-star
+terms kept, and the end-of-pass tests, shape cut and noise / PSF-error checks off.  On one
+LSSTCam tile it took 12.8 s instead of 141 s, recovered 91 % of the full run's S/N > 20 sources,
+and measured them 0.10 mag fainter (the full run refines the PSF wings) with 0.07 mag scatter.
+``fitTiles(..., nJobs=N)`` (``--n-jobs``) fits N tiles at once in worker processes.
+
+The per-source loops of the joint fit run in C++ (``src/jointFit.cc``: the design matrix, source
+groups, model image and group map; ``src/centroids.cc``: the centroid steps; ``src/stamps.cc``:
+batched stamps, crops and windowed derivatives), with the Python loops kept as the fallback when
+the extension is not built and as the reference the tests compare against.  The bright-star
+correction terms stay in NumPy: a C++ port measured slower than NumPy's vectorised code.
+``examples/run_detector_fast.ipynb`` runs a whole detector this way against the clock.
 
 Joint-fit solver
 ----------------

@@ -235,6 +235,8 @@ PIPELINE_DEFAULTS = dict(
                                #   "normal": dense normal-equation NNLS (>= 300 sources) and
                                #             scipy lsq_linear below that (the previous behaviour)
                                #   "scipy":  scipy.optimize.lsq_linear (method 'trf') always
+    jointSolverTol=1e-8,     # "eigen" stopping tolerance on ||A^T r|| / ||A^T b|| (pipe_crowd:
+                               #   1e-6, ~10% faster here, fluxes change by < 1e-4 relative)
 )
 
 
@@ -499,6 +501,90 @@ def _psfStampCached(psf, x, y, clipBbox, taper=None):
     return arr[by0 - fy0:by1 - fy0 + 1, bx0 - fx0:bx1 - fx0 + 1], bb
 
 
+def _psfStampBatchCached(psf, positions, clipBbox, taper=None):
+    """Drop-in for `fitLib.psfStampBatch`: `_psfStampCached` for many positions at once.
+
+    Same stamps and the same cache as `_psfStampCached` (identical keys), but the stamp-size,
+    extended-source and brightness rules are looked up for all positions in one query each, plain
+    cache misses are rendered in one C++ call (`fastKernels.renderStamps`) and cropped in C++
+    (``cropStamps``).  Misses of extended sources or with the brightness term, and PSFs without
+    the fast path, go through `_psfStampCached` one by one.
+    """
+    if L.psfStamp is not _psfStampCached:            # psfStamp patched (tests): honour it
+        return _ORIG["psfStampBatch"](psf, positions, clipBbox, taper=taper)
+    xy = np.asarray(positions, float).reshape(-1, 2)
+    n = len(xy)
+    if n == 0:
+        return []
+    ent = _STAMP_CACHE.get(id(psf))
+    if ent is None or ent[0] is not psf:
+        ent = (psf, OrderedDict())
+        _STAMP_CACHE[id(psf)] = ent
+    store = ent[1]
+    half = np.full(n, -1, dtype=np.int64)
+    if _SIZE_RULE["tree"] is not None:
+        d, i = _SIZE_RULE["tree"].query(xy)
+        near = d <= _SIZE_RULE["tol"]
+        half[near] = np.asarray(_SIZE_RULE["half"])[i[near]].astype(np.int64)
+    special = np.zeros(n, bool)                   # extended sources or the brightness term
+    if _EXT_RULE["tree"] is not None:
+        d, _ = _EXT_RULE["tree"].query(xy)
+        special |= d <= 1e-6
+    if _BF["prof"] is not None and _BF["tree"] is not None:
+        d, _ = _BF["tree"].query(xy)
+        special |= d <= _BF["tol"]
+    fast = _fastFor(psf)
+    hits = [None] * n
+    miss = []
+    for k in range(n):
+        x, y = float(xy[k, 0]), float(xy[k, 1])
+        if special[k] or fast is None:
+            continue
+        key = (x, y, taper, int(half[k]), 0.0, 0.0, 1.0, 0.0, "gauss")
+        h = store.get(key)
+        if h is None:
+            miss.append((k, key))
+        else:
+            store.move_to_end(key)
+            hits[k] = h
+    if miss:
+        from .fastKernels import renderStamps, _lib as _fkLib
+        mk = np.array([k for k, _ in miss])
+        st, x0, y0 = renderStamps(fast.kernel, xy[mk, 0], xy[mk, 1], fast.order, taper)
+        hm = half[mk]
+        if (hm > 0).any():
+            if _fkLib is not None and hasattr(_fkLib, "cropStamps"):
+                _fkLib.cropStamps(st, np.asarray(x0, dtype=np.int64), np.asarray(y0, dtype=np.int64),
+                                  np.ascontiguousarray(xy[mk, 0]), np.ascontiguousarray(xy[mk, 1]), hm)
+            else:
+                for m in np.flatnonzero(hm > 0):
+                    st[m] = _cropStamp(st[m], int(x0[m]), int(y0[m]), xy[mk[m], 0], xy[mk[m], 1],
+                                       int(hm[m]))
+        sny, snx = st.shape[1], st.shape[2]
+        for m, (k, key) in enumerate(miss):
+            h = (st[m], int(x0[m]), int(y0[m]), int(x0[m]) + snx - 1, int(y0[m]) + sny - 1)
+            store[key] = h
+            hits[k] = h
+        while len(store) > STAMP_CACHE_MAX:
+            store.popitem(last=False)
+    cx0, cy0, cx1, cy1 = clipBbox.getMinX(), clipBbox.getMinY(), clipBbox.getMaxX(), clipBbox.getMaxY()
+    out = []
+    for k in range(n):
+        h = hits[k]
+        if h is None:                             # special cases: the scalar path
+            a, bb = _psfStampCached(psf, xy[k, 0], xy[k, 1], clipBbox, taper)
+            out.append((None, None) if a is None else
+                       (a, (bb.getMinX(), bb.getMinY(), bb.getMaxX(), bb.getMaxY())))
+            continue
+        arr, fx0, fy0, fx1, fy1 = h
+        bx0, by0, bx1, by1 = max(fx0, cx0), max(fy0, cy0), min(fx1, cx1), min(fy1, cy1)
+        if bx0 > bx1 or by0 > by1:
+            out.append((None, None))
+        else:
+            out.append((arr[by0 - fy0:by1 - fy0 + 1, bx0 - fx0:bx1 - fx0 + 1], (bx0, by0, bx1, by1)))
+    return out
+
+
 def _invDiag(M):
     """Return diag(M^-1) of a symmetric positive (semi)definite matrix."""
     try:
@@ -529,6 +615,8 @@ def ampSnrFullFast(fit, noiseScale=1.0):
     """
     comps, var, good = fit["comps"], fit["variance"], fit["good"]
     n = len(comps)
+    if fit.get("Aw") is not None and fit["Aw"].shape[1] == n:
+        return _snrFromMatrix(fit["Aw"], fit["amps"], noiseScale)
     pix = -np.ones(good.shape, dtype=np.int64)
     idx = np.flatnonzero(good.ravel())
     pix.ravel()[idx] = np.arange(len(idx))
@@ -544,6 +632,12 @@ def ampSnrFullFast(fit, noiseScale=1.0):
         return np.zeros(n)
     A = coo_matrix((np.concatenate(V), (np.concatenate(R), np.concatenate(C))),
                    shape=(len(idx), n)).tocsr()
+    return _snrFromMatrix(A, fit["amps"], noiseScale)
+
+
+def _snrFromMatrix(A, amps, noiseScale):
+    """S/N per column of the weighted design matrix A (see `ampSnrFullFast`)."""
+    n = A.shape[1]
     N = (A.T @ A).tocsr()
     _, lab = connected_components(N, directed=False)
     counts = np.bincount(lab)
@@ -557,7 +651,7 @@ def ampSnrFullFast(fit, noiseScale=1.0):
         ii = order[starts[c]:starts[c] + counts[c]]
         varAmp[ii] = _invDiag(N[ii][:, ii].toarray())
     sig = np.sqrt(np.clip(varAmp, 1e-30, None)) * noiseScale
-    return np.where(np.isfinite(sig), fit["amps"] / sig, 0.0)
+    return np.where(np.isfinite(sig), amps / sig, 0.0)
 
 
 NNLS_MIN_SOURCES = 300            # below this lsq_linear is already fast (often 0 iterations)
@@ -661,6 +755,35 @@ def _lsqLinearNormal(A, b, bounds, **kw):
     return OptimizeResult(x=x, status=1, nit=0, cost=0.5 * float(res @ res), success=True)
 
 
+def _warmStart(n):
+    """Starting fluxes for the joint fit now being solved, from the previous one (or None).
+
+    `_jointFitWarm` records the positions being fitted and, afterwards, the fitted fluxes; a
+    source starts from the flux of the previous fit's source within 0.5 px of it (0 if none).
+    Only the starting point of the iterative solve changes, not its answer.
+    """
+    cur, last = _SOLVER.get("positions"), _SOLVER.get("last")
+    if cur is None or last is None or len(cur[0]) != n or cur[1] != last[2] or not len(last[0]):
+        return None
+    d, k = cKDTree(last[0]).query(cur[0], distance_upper_bound=0.5)
+    ok = np.isfinite(d)
+    x0 = np.zeros(n)
+    x0[ok] = np.clip(last[1][k[ok]], 0.0, None)
+    return x0
+
+
+def _jointFitWarm(exposure, psf, peakPositions, badBitmask, **kw):
+    """`fitLib.jointPsfFitDiag`, recording positions and fluxes for the next solve's warm start."""
+    xy = np.asarray(peakPositions, float).reshape(-1, 2)
+    _SOLVER["positions"] = (xy, id(exposure))
+    try:
+        fit = _ORIG["jointPsfFitDiag"](exposure, psf, peakPositions, badBitmask, **kw)
+    finally:
+        _SOLVER["positions"] = None
+    _SOLVER["last"] = (xy, np.asarray(fit["amps"], float).copy(), id(exposure))
+    return fit
+
+
 def _lsqLinearEigen(A, b, bounds, **kw):
     """Solve a joint fit with the sparse Eigen LSCG solver; "normal" path if it cannot."""
     from scipy.optimize import OptimizeResult
@@ -671,8 +794,8 @@ def _lsqLinearEigen(A, b, bounds, **kw):
                   "rebuild with scons or setup.py) -- using jointSolver='normal'")
             _SOLVER["warned"] = True
         return _lsqLinearNormal(A, b, bounds, **kw)
-    r = solveSparse(A, b, nonNegative=True, tol=_SOLVER["tol"], maxIter=_SOLVER["maxIter"],
-                    maxActiveSet=_SOLVER["maxActiveSet"])
+    r = solveSparse(A, b, nonNegative=True, x0=_warmStart(A.shape[1]), tol=_SOLVER["tol"],
+                    maxIter=_SOLVER["maxIter"], maxActiveSet=_SOLVER["maxActiveSet"])
     _SOLVER["stats"]["cgIterations"] += r.cgIterations
     if not r.converged:
         _SOLVER["stats"]["fallbacks"] += 1
@@ -824,11 +947,15 @@ def enableSpeedups():
         _ORIG["ampSnrFull"] = L.ampSnrFull
         _ORIG["lsq_linear"] = L.lsq_linear
         _ORIG["computePsfDerivatives"] = L.computePsfDerivatives
+        _ORIG["jointPsfFitDiag"] = L.jointPsfFitDiag
+        _ORIG["psfStampBatch"] = L.psfStampBatch
         _HUGE = L.geom.Box2I(L.geom.Point2I(-10 ** 8, -10 ** 8), L.geom.Extent2I(2 * 10 ** 8, 2 * 10 ** 8))
     L.psfStamp = _psfStampCached
     L.ampSnrFull = ampSnrFullFast
     L.lsq_linear = _lsqLinearFast
     L.computePsfDerivatives = _psfDerivativesFast
+    L.jointPsfFitDiag = _jointFitWarm
+    L.psfStampBatch = _psfStampBatchCached
 
 
 def disableSpeedups():
@@ -838,7 +965,10 @@ def disableSpeedups():
         L.ampSnrFull = _ORIG["ampSnrFull"]
         L.lsq_linear = _ORIG["lsq_linear"]
         L.computePsfDerivatives = _ORIG["computePsfDerivatives"]
+        L.jointPsfFitDiag = _ORIG["jointPsfFitDiag"]
+        L.psfStampBatch = _ORIG["psfStampBatch"]
     _FAST["cache"].clear()
+    _SOLVER["last"] = None
     clearStampCache()
 
 
@@ -985,8 +1115,55 @@ def _refineSubset(exposure, psf, S, fit, idx, maxShift, minAmp, freezeSep, psfSi
     """Make one Gauss-Newton position step for the sources ``idx`` against the current residual.
 
     Sources fainter than ``minAmp``, extended ones and ones with a brighter neighbour within
-    ``freezeSep`` stay put.  Returns the new positions of all sources.
+    ``freezeSep`` stay put.  Returns the new positions of all sources.  The per-source loop runs
+    in C++ (``refineCentroids``) when the fast PSF stamps are in use; otherwise in Python
+    (`_refineSubsetPython`, the same steps).
     """
+    fast = _fastFor(psf)
+    lib = _fkLib()
+    if (fast is None or lib is None or not hasattr(lib, "refineCentroids")
+            or L.psfStamp is not _psfStampCached
+            or L.computePsfDerivatives is not _psfDerivativesFast):
+        return _refineSubsetPython(exposure, psf, S, fit, idx, maxShift, minAmp, freezeSep, psfSigma)
+    eb = exposure.getBBox()
+    X0, Y0 = eb.getMinX(), eb.getMinY()
+    amps, xy = fit["amps"], S["xy"]
+    new = xy.copy()
+    idx = np.asarray(idx, dtype=np.int64).ravel()
+    cand = idx[(amps[idx] >= minAmp) & ~(S["ext"][idx] > 0)]
+    if len(xy) > 1 and freezeSep and len(cand):   # a brighter source within freezeSep: stay put
+        tree = cKDTree(xy)
+        pairs = tree.query_ball_point(xy[cand], freezeSep)
+        frozen = np.array([any(k != j and amps[k] > amps[j] for k in p) for j, p in zip(cand, pairs)],
+                          dtype=bool)
+        cand = cand[~frozen]
+    if not len(cand):
+        return new
+    R2 = (2.5 * psfSigma) ** 2
+    rWin = int(np.ceil(np.sqrt(R2))) + 1
+    stamps = _psfStampBatchCached(psf, xy[cand], eb, taper=L.WING_TAPER)
+    views = [None if a is None else (a, b[0] - X0, b[1] - Y0) for a, b in stamps]
+    resid = exposure.image.array - fit["modelFull"]
+    nx_, ny_, moved = lib.refineCentroids(
+        fast.kernel, int(fast.order), 0.25, np.ascontiguousarray(xy[cand, 0]),
+        np.ascontiguousarray(xy[cand, 1]), np.ascontiguousarray(amps[cand], dtype=float), views,
+        np.ascontiguousarray(resid, dtype=float),
+        np.ascontiguousarray(fit["variance"], dtype=float),
+        np.ascontiguousarray(fit["good"], dtype=np.uint8), X0, Y0, float(R2), rWin, float(maxShift))
+    m = moved.astype(bool)
+    new[cand[m], 0] = nx_[m]
+    new[cand[m], 1] = ny_[m]
+    return new
+
+
+def _fkLib():
+    """The C++ extension module, or None."""
+    from .fastKernels import _lib
+    return _lib
+
+
+def _refineSubsetPython(exposure, psf, S, fit, idx, maxShift, minAmp, freezeSep, psfSigma):
+    """`_refineSubset` in Python (no fast stamps or no C++ extension; the tests' reference)."""
     eb = exposure.getBBox()
     data, var, good, amps = exposure.image.array, fit["variance"], fit["good"], fit["amps"]
     resid = data - fit["modelFull"]
@@ -994,6 +1171,7 @@ def _refineSubset(exposure, psf, S, fit, idx, maxShift, minAmp, freezeSep, psfSi
     new = xy.copy()
     tree = cKDTree(xy) if len(xy) > 1 else None
     R2 = (2.5 * psfSigma) ** 2
+    rWin = int(np.ceil(np.sqrt(R2))) + 1
     for j in idx:
         a = amps[j]
         if a < minAmp or S["ext"][j] > 0:
@@ -1002,7 +1180,14 @@ def _refineSubset(exposure, psf, S, fit, idx, maxShift, minAmp, freezeSep, psfSi
         if tree is not None and freezeSep:
             if any(k != j and amps[k] > a for k in tree.query_ball_point(xy[j], freezeSep)):
                 continue
-        dpdx, dpdy, bb = L.computePsfDerivatives(psf, x, y, eb)
+        # only pixels within sqrt(R2) of the source are fitted: render the derivatives over a
+        # window just covering them (identical values, far fewer pixels than the full stamp)
+        ix, iy = int(np.floor(x)), int(np.floor(y))
+        win = L.geom.Box2I(L.geom.Point2I(ix - rWin, iy - rWin), L.geom.Point2I(ix + rWin + 1, iy + rWin + 1))
+        win.clip(eb)
+        if win.isEmpty():
+            continue
+        dpdx, dpdy, bb = L.computePsfDerivatives(psf, x, y, win)
         if dpdx is None:
             continue
         ys, xs = L.bboxToSlices(bb, eb)
@@ -1546,78 +1731,138 @@ def brightStarCorrections(exposure, S, fit, model, psfPeak, noise, fwhm, badBitm
     corr = np.zeros_like(model)
     snr = amps * psfPeak / noise
     picks = set(np.flatnonzero(snr > sigmaMin).tolist())
-    if sat.any():
-        for j, (x, y) in enumerate(S["xy"]):
-            ix, iy = int(round(x)) - X0, int(round(y)) - Y0
-            if 0 <= iy < sat.shape[0] and 0 <= ix < sat.shape[1] and sat[iy, ix] and amps[j] > 0:
-                picks.add(j)
+    if sat.any() and len(S["xy"]):                 # sources on a saturated pixel
+        ix = np.array([int(round(x)) for x in S["xy"][:, 0]]) - X0
+        iy = np.array([int(round(y)) for y in S["xy"][:, 1]]) - Y0
+        inside = (iy >= 0) & (iy < sat.shape[0]) & (ix >= 0) & (ix < sat.shape[1])
+        onSat = np.zeros(len(ix), bool)
+        onSat[inside] = sat[iy[inside], ix[inside]]
+        picks |= set(np.flatnonzero(onSat & (amps > 0)).tolist())
     order = sorted(picks, key=lambda j: -amps[j])
     R = radiusFwhm * fwhm
     imgs, info = {}, {}
-    for sweep in range(sweeps):
+    basis = {}                 # per star: terms, fit pixels, weights and the factorised matrix,
+    for sweep in range(sweeps):  # built once and reused by every sweep (only the residual changes)
         for j in order:
             c = fit["comps"][j]
             if c is None or amps[j] <= 0:
                 continue
             ys, xs = c["ys"], c["xs"]
-            Pm = c["stamp"]
-            gy, gx = np.gradient(Pm)
-            gyy, gyx = np.gradient(gy)
-            _, gxx = np.gradient(gx)
-            yy, xx = np.mgrid[ys.start:ys.stop, xs.start:xs.stop]
-            px, py = S["xy"][j, 0] - X0, S["xy"][j, 1] - Y0
-            rr = np.hypot(xx - px, yy - py)
-            Rj, rks, isSat = R, (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5), False
-            if zones is not None and len(zones):           # saturated star: model its halo
-                dz = np.hypot(zones[:, 0] - S["xy"][j, 0], zones[:, 1] - S["xy"][j, 1])
-                k = int(np.argmin(dz))
-                if dz[k] < 0.5 * zones[k, 2]:
-                    Rj = max(R, zones[k, 2])
-                    rks = tuple(np.arange(0.5, Rj / fwhm + 0.01, 0.75))
-                    isSat = True
-            okpix = good[ys, xs] & (var[ys, xs] > 0)
-            terms = [Pm, gx, gy, gxx, gyy, gyx]
-            if radial:                  # smooth rings: core/halo profile differs from the PSF
-                for rk in rks:
-                    ring = np.exp(-0.5 * ((rr - rk * fwhm) / (0.5 * fwhm)) ** 2)
-                    if (okpix & (ring > 0.5)).sum() >= 10:     # skip rings inside the mask
-                        terms.append(Pm.max() * ring)
-                        nm = (haloModes if isSat else (brightModes if rk <= 4.0 else 0))
-                        if nm:                                 # non-circular structure
-                            th = np.arctan2(yy - py, xx - px)
-                            for mm in range(1, int(nm) + 1):
-                                terms += [Pm.max() * ring * np.cos(mm * th),
-                                          Pm.max() * ring * np.sin(mm * th)]
-            if coreRings and not isSat:   # narrow core structure (1-2 px scale)
-                thc = np.arctan2(yy - py, xx - px)
-                for rk in coreRings:
-                    ring = np.exp(-0.5 * ((rr - rk) / coreSigma) ** 2)
-                    if (okpix & (ring > 0.5)).sum() >= 1:
-                        terms.append(Pm.max() * ring)
-                        base = ring * (rr / coreSigma if rk == 0 else 1.0)  # spike: its own dipole
-                        for mm in range(1, int(coreModes) + 1):
-                            terms += [Pm.max() * base * np.cos(mm * thc),
-                                      Pm.max() * base * np.sin(mm * thc)]
-            T = np.array(terms) * amps[j]
+            if j not in basis:
+                basis[j] = _brightBasis(c["stamp"], ys, xs, S["xy"][j, 0] - X0, S["xy"][j, 1] - Y0,
+                                        S["xy"][j], amps[j], good, var, R, fwhm, zones, radial,
+                                        haloModes, brightModes, coreRings, coreSigma, coreModes)
+            B = basis[j]
             if j in imgs:
                 corr[ys, xs] -= imgs[j]
-            sel = okpix & (rr < Rj)
-            if sel.sum() < 30:
+            if B is None:
                 continue
-            w = 1.0 / np.sqrt(var[ys, xs][sel])
+            T, sel, w = B["T"], B["sel"], B["w"]
             r = (data[ys, xs] - model[ys, xs] - corr[ys, xs])[sel] * w
-            coef, *_ = np.linalg.lstsq(T[:, sel].T * w[:, None], r, rcond=1e-8)
+            coef = B["solve"](r)
             imgs[j] = np.tensordot(coef, T, axes=1)
             corr[ys, xs] += imgs[j]
             if sweep == sweeps - 1:
                 r2 = r - (imgs[j][sel] * w)
-                ring = np.hypot(xx - px, yy - py) < R
+                ring = B["rr"] < R
                 info[j] = dict(x=float(S["xy"][j, 0]), y=float(S["xy"][j, 1]), snr=float(snr[j]),
                                nSat=int((sat[ys, xs] & ring).sum()), flux=float(coef[0] * amps[j]),
                                dfluxPct=float(100 * coef[0]),
                                dx=float(-coef[1]), dy=float(-coef[2]),
                                chi2Before=float(np.mean(r ** 2)), chi2After=float(np.mean(r2 ** 2)))
     return corr, info
+
+
+def _lstsqSolver(A, rcond=1e-8, maxCond=1e4):
+    """Return ``f(r)`` = the minimum-norm least-squares solution of ``A x = r``, for any r.
+
+    Same answer as ``numpy.linalg.lstsq(A, r, rcond=rcond)``, with A factorised once so that
+    several right-hand sides cost only matrix-vector products.  When A (columns scaled to unit
+    length) has a condition number below ``maxCond``, lstsq would not drop any singular value and
+    the solution is unique, so it is computed from the small Gram matrix ``A^T A`` (much faster
+    than a QR / SVD of the tall A; agrees to ~``maxCond^2`` x machine precision).  Otherwise the
+    exact path is used: QR, then the SVD of R, dropping singular values below ``rcond`` x the
+    largest, as lstsq does.
+    """
+    m, n = A.shape
+    cn = np.sqrt(np.einsum("ij,ij->j", A, A))
+    if m >= n and np.all(cn > 0):
+        As = A / cn
+        lam, V = np.linalg.eigh(As.T @ As)
+        if lam[0] > lam[-1] / maxCond ** 2:
+            Ginv = (V / lam) @ V.T
+
+            def solveGram(r):
+                return (Ginv @ (As.T @ r)) / cn
+            return solveGram
+    if m >= n:
+        Q, Rm = np.linalg.qr(A)
+        U, s, Vt = np.linalg.svd(Rm)
+        U = Q @ U
+    else:
+        U, s, Vt = np.linalg.svd(A, full_matrices=False)
+    keep = s > rcond * (s[0] if len(s) else 0.0)
+    U, Vt, sInv = U[:, keep], Vt[keep], 1.0 / s[keep]
+
+    def solve(r):
+        return Vt.T @ (sInv * (U.T @ r))
+    return solve
+
+
+def _brightBasis(Pm, ys, xs, px, py, xyj, amp, good, var, R, fwhm, zones, radial, haloModes,
+                 brightModes, coreRings, coreSigma, coreModes):
+    """Build one bright star's correction terms and factorised fit matrix (`brightStarCorrections`).
+
+    Returns None if fewer than 30 good pixels lie inside the fit radius.
+    """
+    gy, gx = np.gradient(Pm)
+    gyy, gyx = np.gradient(gy)
+    _, gxx = np.gradient(gx)
+    yy, xx = np.mgrid[ys.start:ys.stop, xs.start:xs.stop]
+    rr = np.hypot(xx - px, yy - py)
+    Rj, rks, isSat = R, (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5), False
+    if zones is not None and len(zones):           # saturated star: model its halo
+        dz = np.hypot(zones[:, 0] - xyj[0], zones[:, 1] - xyj[1])
+        k = int(np.argmin(dz))
+        if dz[k] < 0.5 * zones[k, 2]:
+            Rj = max(R, zones[k, 2])
+            rks = tuple(np.arange(0.5, Rj / fwhm + 0.01, 0.75))
+            isSat = True
+    okpix = good[ys, xs] & (var[ys, xs] > 0)
+    pmax = Pm.max()
+    terms = [Pm, gx, gy, gxx, gyy, gyx]
+    trig = {}                                       # cos / sin (m theta), computed once per star
+
+    def modes(nm):
+        if nm not in trig:
+            th = np.arctan2(yy - py, xx - px)
+            trig[nm] = [(np.cos(mm * th), np.sin(mm * th)) for mm in range(1, int(nm) + 1)]
+        return trig[nm]
+
+    if radial:                  # smooth rings: core/halo profile differs from the PSF
+        for rk in rks:
+            ring = np.exp(-0.5 * ((rr - rk * fwhm) / (0.5 * fwhm)) ** 2)
+            if (okpix & (ring > 0.5)).sum() >= 10:     # skip rings inside the mask
+                terms.append(pmax * ring)
+                nm = (haloModes if isSat else (brightModes if rk <= 4.0 else 0))
+                if nm:                                 # non-circular structure
+                    for cm, sm in modes(nm):
+                        terms += [pmax * ring * cm, pmax * ring * sm]
+    if coreRings and not isSat:   # narrow core structure (1-2 px scale)
+        for rk in coreRings:
+            ring = np.exp(-0.5 * ((rr - rk) / coreSigma) ** 2)
+            if (okpix & (ring > 0.5)).sum() >= 1:
+                terms.append(pmax * ring)
+                base = ring * (rr / coreSigma if rk == 0 else 1.0)  # spike: its own dipole
+                if coreModes:
+                    for cm, sm in modes(coreModes):
+                        terms += [pmax * base * cm, pmax * base * sm]
+    T = np.array(terms) * amp
+    sel = okpix & (rr < Rj)
+    if sel.sum() < 30:
+        return None
+    w = 1.0 / np.sqrt(var[ys, xs][sel])
+    return dict(T=T, sel=sel, w=w, rr=rr, solve=_lstsqSolver(T[:, sel].T * w[:, None]))
 
 
 def printBrightCorrections(info, maxRows=15):
@@ -1661,7 +1906,7 @@ def _detect(workingResidual, threshold, minPixels):
 
 def _slim(fit):
     """Return a fit without its large per-source arrays (for older snapshots)."""
-    return {k: v for k, v in fit.items() if k not in ("comps", "chi2map", "groupMap")}
+    return {k: v for k, v in fit.items() if k not in ("comps", "chi2map", "groupMap", "Aw")}
 
 
 # =====================================================================
@@ -3837,7 +4082,7 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
     P = _params(cfg)
     _FAST["on"] = bool(P["fastStamps"])
     _FAST["cache"].clear()
-    setJointSolver(P["jointSolver"])
+    setJointSolver(P["jointSolver"], tol=P["jointSolverTol"])
     _bfReset()
     print(f"meas_crowd {__version__}: brightness term {'ON' if P['bfTerm'] else 'off'}, "
           f"PSF core median {'ON' if P['psfCoreMedian'] else 'off'}, "

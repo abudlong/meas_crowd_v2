@@ -1585,7 +1585,7 @@ import matplotlib.patches as patches
 import matplotlib.patheffects as pe
 from matplotlib.colors import ListedColormap
 from astropy.visualization import simple_norm
-from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse import coo_matrix, csc_matrix, csr_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.optimize import lsq_linear
 from scipy.spatial import cKDTree
@@ -1595,6 +1595,11 @@ from scipy.signal import fftconvolve
 
 import lsst.geom as geom
 import lsst.afw.math as afwMath
+try:                                    # C++ per-source loops (joint-fit matrix and model);
+    import importlib as _importlib       # imported by name, not through the package's lazy loader
+    _lib = _importlib.import_module("lsst.meas.crowd._crowdLib")
+except ImportError:
+    _lib = None
 import lsst.afw.table as afwTable
 from lsst.meas.algorithms import SourceDetectionTask
 from lsst.meas.algorithms.subtractBackground import TooManyMaskedPixelsError
@@ -2719,30 +2724,25 @@ def jointPsfFitDiag(exposure, psf, peakPositions, badBitmask,
 
     timings = {}
     t0 = time.perf_counter()
-    comps = []
-    rL, cL, vL, brL, bcL = [], [], [], [], []
-    for j, (x, y) in enumerate(peakPositions):
-        stamp, bbox = psfStamp(psf, x, y, expBbox, taper=WING_TAPER)
-        if stamp is None:
-            comps.append(None)
-            continue
-        ys_, xs_ = bboxToSlices(bbox, expBbox)
-        subIdx = pixelIndex[ys_, xs_]
-        smax = stamp.max()
-        sig = stamp > supportFrac * smax if smax > 0 else np.zeros_like(stamp, bool)
-        ok = (subIdx >= 0) & (stamp != 0)
-        okb = ok & sig
-        rL.append(subIdx[ok]); cL.append(np.full(int(ok.sum()), j)); vL.append(stamp[ok])
-        brL.append(subIdx[okb]); bcL.append(np.full(int(okb.sum()), j))
-        comps.append(dict(j=j, amp=0.0, stamp=stamp, sig=sig, ys=ys_, xs=xs_,
-                          bboxParent=(bbox.getMinX(), bbox.getMaxX(),
-                                       bbox.getMinY(), bbox.getMaxY())))
-
-    cat = lambda l, dt: np.concatenate(l) if l else np.array([], dtype=dt)
-    rows, cols, vals = cat(rL, np.int64), cat(cL, np.int64), cat(vL, float)
-    A = coo_matrix((vals, (rows, cols)), shape=(nPix, nSrc)).tocsr()
+    X0, Y0 = expBbox.getMinX(), expBbox.getMinY()
     sqrtW = np.sqrt(wVec)
-    Aw = csr_matrix(A.multiply(sqrtW[:, None]))
+    stamps = psfStampBatch(psf, peakPositions, expBbox, taper=WING_TAPER)
+    useCxx = _lib is not None and hasattr(_lib, "buildDesignMatrix")
+    if useCxx:     # the per-source loops in C++ (src/jointFit.cc): same values, same groups
+        views = [None if a is None else (a, b[0] - X0, b[1] - Y0) for a, b in stamps]
+        dm = _lib.buildDesignMatrix(views, pixelIndex, sqrtW, float(supportFrac))
+        Aw = csc_matrix((dm["data"], dm["indices"], dm["indptr"]), shape=(nPix, nSrc))
+        labels, nGroups = dm["labels"].astype(np.int64), int(dm["nGroups"])
+        sigAll, sigOff = dm["sig"].view(bool), dm["sigOffset"]
+        comps = [None if a is None else
+                 dict(j=k, amp=0.0, stamp=a, sig=sigAll[sigOff[k]:sigOff[k + 1]].reshape(a.shape),
+                      ys=slice(b[1] - Y0, b[3] - Y0 + 1), xs=slice(b[0] - X0, b[2] - X0 + 1),
+                      bboxParent=(b[0], b[2], b[1], b[3]))
+                 for k, (a, b) in enumerate(stamps)]
+    else:
+        Aw, comps, labels, nGroups = _designMatrixPython(stamps, pixelIndex, sqrtW, X0, Y0, nPix,
+                                                         supportFrac)
+    Aw.has_sorted_indices = True
     dw = dVec * sqrtW
     timings['joint fit: build A'] = time.perf_counter() - t0
 
@@ -2752,38 +2752,106 @@ def jointPsfFitDiag(exposure, psf, peakPositions, badBitmask,
     timings['joint fit: lsq_linear'] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    modelFull = np.zeros((ny, nx))
-    for j, c in enumerate(comps):
-        if c is None:
-            continue
-        c['amp'] = float(amps[j])
-        if amps[j] > ampZeroTol:
-            modelFull[c['ys'], c['xs']] += amps[j] * c['stamp']
-
-    br, bc = cat(brL, np.int64), cat(bcL, np.int64)
-    B = coo_matrix((np.ones(len(br)), (br, bc)), shape=(nPix, nSrc)).tocsr()
-    nGroups, labels = connected_components(B.T @ B, directed=False)
-    groupMap = -np.ones((ny, nx), dtype=np.int64)
-    for j, c in enumerate(comps):
-        if c is None:
-            continue
-        sub = groupMap[c['ys'], c['xs']]
-        sub[c['sig']] = labels[j]
+    for k, c in enumerate(comps):
+        if c is not None:
+            c['amp'] = float(amps[k])
+    if useCxx:
+        modelFull, groupMap = _lib.accumulateModel(views, np.ascontiguousarray(amps, float),
+                                                   float(ampZeroTol), dm["labels"], dm["sig"],
+                                                   sigOff, ny, nx)
+    else:
+        modelFull = np.zeros((ny, nx))
+        groupMap = -np.ones((ny, nx), dtype=np.int64)
+        for k, c in enumerate(comps):
+            if c is not None and amps[k] > ampZeroTol:
+                modelFull[c['ys'], c['xs']] += amps[k] * c['stamp']
+        for k, c in enumerate(comps):
+            if c is not None:
+                sub = groupMap[c['ys'], c['xs']]
+                sub[c['sig']] = labels[k]
 
     resid = data - modelFull
     chi2map = np.zeros((ny, nx))
     chi2map[good] = resid[good] ** 2 / variance[good]
-    groupChi2 = {}
-    for g in range(nGroups):
-        m = (groupMap == g) & good
-        groupChi2[g] = (chi2map[m].sum() / m.sum()) if m.sum() > 0 else np.nan
+    # mean chi2 per group over its good pixels (one pass, instead of one image scan per group)
+    gm = groupMap[good]
+    inGroup = gm >= 0
+    num = np.bincount(gm[inGroup], weights=chi2map[good][inGroup], minlength=nGroups)
+    cnt = np.bincount(gm[inGroup], minlength=nGroups)
+    groupChi2 = {g: (num[g] / cnt[g]) if cnt[g] > 0 else np.nan for g in range(nGroups)}
     timings['joint fit: model + groups'] = time.perf_counter() - t0
 
     return dict(amps=amps, modelFull=modelFull, nAtZero=int(np.sum(amps <= ampZeroTol)),
                 comps=comps, groupLabels=labels, nGroups=nGroups, groupMap=groupMap,
                 groupChi2=groupChi2, good=good, chi2map=chi2map, timings=timings,
                 lsqStatus=res.status, lsqNit=res.nit, lsqCost=res.cost,
-                variance=variance)
+                variance=variance, Aw=Aw)
+
+
+def _designMatrixPython(stamps, pixelIndex, sqrtW, X0, Y0, nPix, supportFrac):
+    """The design matrix, per-source records and source groups in Python.
+
+    The fallback of `jointPsfFitDiag` when the C++ extension lacks ``buildDesignMatrix`` (and the
+    reference it is tested against).  ``stamps`` as returned by `psfStampBatch`.
+    """
+    nSrc = len(stamps)
+    comps = []
+    rL, vL, brL, bcL = [], [], [], []
+    counts = np.zeros(nSrc, dtype=np.int64)
+    for j, (stamp, b) in enumerate(stamps):
+        if stamp is None:
+            comps.append(None)
+            continue
+        ys_, xs_ = slice(b[1] - Y0, b[3] - Y0 + 1), slice(b[0] - X0, b[2] - X0 + 1)
+        subIdx = pixelIndex[ys_, xs_]
+        smax = stamp.max()
+        sig = stamp > supportFrac * smax if smax > 0 else np.zeros_like(stamp, bool)
+        ok = (subIdx >= 0) & (stamp != 0)
+        okb = ok & sig
+        rL.append(subIdx[ok]); vL.append(stamp[ok])
+        counts[j] = int(ok.sum())
+        brL.append(subIdx[okb]); bcL.append(np.full(int(okb.sum()), j))
+        comps.append(dict(j=j, amp=0.0, stamp=stamp, sig=sig, ys=ys_, xs=xs_,
+                          bboxParent=(b[0], b[2], b[1], b[3])))
+    cat = lambda l, dt: np.concatenate(l) if l else np.array([], dtype=dt)
+    rows, vals = cat(rL, np.int64), cat(vL, float)
+    # each source's pixels are one column, already in increasing row order: CSC directly
+    indptr = np.concatenate([[0], np.cumsum(counts)])
+    idxType = np.int32 if max(nPix, len(rows)) < 2 ** 31 else np.int64
+    Aw = csc_matrix((vals * sqrtW[rows], rows.astype(idxType), indptr.astype(idxType)),
+                    shape=(nPix, nSrc))
+    br, bc = cat(brL, np.int64), cat(bcL, np.int64)
+    B = coo_matrix((np.ones(len(br)), (br, bc)), shape=(nPix, nSrc)).tocsr()
+    nGroups, labels = connected_components(B.T @ B, directed=False)
+    return Aw, comps, labels, nGroups
+
+
+def psfStampBatch(psf, positions, clipBbox, taper=None):
+    """Render the PSF stamps of many sources (`psfStamp` for each).
+
+    Parameters
+    ----------
+    psf : `lsst.afw.detection.Psf`
+        PSF model.
+    positions : sequence of (x, y)
+        Positions in parent pixel coordinates.
+    clipBbox : `lsst.geom.Box2I`
+        Box to clip the stamps to.
+    taper : `tuple` [`float`, `float`], optional
+        Wing taper (see `psfStamp`).
+
+    Returns
+    -------
+    stamps : `list` [`tuple`]
+        Per position ``(stamp, (xmin, ymin, xmax, ymax))``, or ``(None, None)`` if the stamp misses
+        ``clipBbox``.
+    """
+    out = []
+    for x, y in positions:
+        a, bb = psfStamp(psf, x, y, clipBbox, taper=taper)
+        out.append((None, None) if a is None else
+                   (a, (bb.getMinX(), bb.getMinY(), bb.getMaxX(), bb.getMaxY())))
+    return out
 
 
 # =====================================================================

@@ -585,10 +585,14 @@ class StellarConfigTestCase(unittest.TestCase):
         from lsst.meas.crowd import session
         script = os.path.join(os.path.dirname(__file__), os.pardir, "bin.src", "crowdDetector.py")
         ns = runpy.run_path(script, run_name="crowdDetector")
-        self.assertEqual(set(ns["CONFIGS"]), {"stellar", "crowded"})
+        self.assertEqual(set(ns["CONFIGS"]), {"stellar", "crowded", "fast"})
         self.assertIs(getattr(session, ns["CONFIGS"]["stellar"]),
                       session.CROWDED_STELLAR_FIELD_CONFIG)
         self.assertIs(getattr(session, ns["CONFIGS"]["crowded"]), session.CROWDED_FIELD_CONFIG)
+        self.assertIs(getattr(session, ns["CONFIGS"]["fast"]), session.FAST_STELLAR_FIELD_CONFIG)
+        P = __import__("lsst.meas.crowd.pipeline", fromlist=["x"])._params(
+            session.makeConfig(session.FAST_STELLAR_FIELD_CONFIG))   # every fast option is valid
+        self.assertEqual(P["maxOuter"], 1)
 
 
 if __name__ == "__main__":

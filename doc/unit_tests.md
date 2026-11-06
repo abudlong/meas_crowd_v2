@@ -4,7 +4,7 @@ Every unit test in `tests/`: what it checks, what it feeds in, and what it must 
 pass.  How to run them and read the results is in the
 [pipeline guide](pipeline_guide.md#unit-tests-running-them-and-checking-the-results).
 
-The suite has **122 tests in 12 files**.  Without the Rubin stack 120 run and the 2 in
+The suite has **130 tests in 13 files**.  Without the Rubin stack 128 run and the 2 in
 `test_fastStampsStack.py` are skipped; `testCxxEqualsNumpy` is also skipped if the C++ extension
 was not built, and the `test_sparseSolver.py` solver tests if it was built without the
 sparse solver.  `test_docstrings.py` checks that this page lists every test and that the
@@ -14,6 +14,7 @@ sparse solver.  `test_docstrings.py` checks that this page lists every test and 
 - [test_fastKernels.py](#test_fastkernelspy): fast PSF stamps (C++ and NumPy)
 - [test_fastStampsStack.py](#test_faststampsstackpy): fast stamps against the stack
 - [test_sparseSolver.py](#test_sparsesolverpy): the sparse joint-fit solver (Eigen LSCG)
+- [test_speedups.py](#test_speedupspy): the sped-up steps give the original answers
 - [test_photometry.py](#test_photometrypy): magnitudes, apertures, errors, Gaia comparison
 - [test_pipelineFunctions.py](#test_pipelinefunctionspy): the pipeline's building blocks
 - [test_diagnostics.py](#test_diagnosticspy): residual diagnostics and run-level plots
@@ -84,6 +85,20 @@ The sparse joint-fit solver (`sparseSolver.solveSparse`: pipe_crowd's Eigen
 | `SolveSparseTestCase.testBadInput` | Shape checks | wrong-length b and x0 | `ValueError` |
 | `PipelineSolverTestCase.testOption` | The `jointSolver` option | defaults, `_params`, `setJointSolver("lapack")` | default "eigen", accepted by `_params`, unknown name raises |
 | `PipelineSolverTestCase.testJointFitSameWithEverySolver` | `fitLib.jointPsfFitDiag` with each solver | 350 Gaussian stars of known flux in a 120 px image | one solve each, no fallback; "eigen" and "normal" fluxes and model equal "scipy"'s (to 1e-3 of the maximum), chi2 no worse |
+
+## test_speedups.py
+
+The sped-up steps give the same answers as the code they replace.
+
+| Test | What it checks | Input | Passes when |
+| --- | --- | --- | --- |
+| `LstsqSolverTestCase.testMatchesLstsq` | `pipeline._lstsqSolver` (factorised once, fast Gram path when well conditioned) | random, nearly collinear, rank-deficient, zero-column, wide and badly scaled matrices, two right-hand sides each | equal to `numpy.linalg.lstsq(rcond=1e-8)` to 1e-6 relative |
+| `BrightStarCorrectionsTestCase.testSameAsOriginal` | `brightStarCorrections` with the basis / factorisation built once per star | 8 bright stars (one saturated) among 120 faint ones, PSF slightly narrower than the truth | same correction image (to 1e-8 of its maximum) and the same table as the original implementation (kept in the test) |
+| `WindowedDerivativesTestCase.testSameAsFullStamp` | `FastPsf.derivatives` rendering only the clip window (C++ `renderDerivativesWindow`) | 200 random positions and windows, some clipped at the image edge | bit-identical to the full stamps cropped to the window |
+| `SnrFromFitMatrixTestCase.testSameAsRebuilt` | `ampSnrFullFast` reusing the fit's stored weighted matrix | 150 stars in a 120 px image | equal to the S/N with the matrix rebuilt from the stamps |
+| `CxxLoopsTestCase.testStampBatchSameAsOneByOne` | `pipeline._psfStampBatchCached` (one rule query for all sources, misses rendered and cropped in C++) | 260 sources with size-rule crops, a constant PSF on the fast path | every stamp and box equal to `_psfStampCached`'s, one by one |
+| `CxxLoopsTestCase.testDesignMatrixAndModel` | `jointPsfFitDiag` with the C++ matrix / group / model loops (`buildDesignMatrix`, `accumulateModel`) | the same scene with bad pixels, solved from the same start | identical matrix, groups, group map, masks, fluxes and model to the Python loops; group chi2 to 1e-12 |
+| `CxxLoopsTestCase.testCentroidStepSameAsPython` | `_refineSubset`'s per-source loop in C++ (`refineCentroids`) | the same scene, three sources marked extended | the same sources move, to the same positions (1e-9 px) as `_refineSubsetPython` |
 
 ## test_photometry.py
 
@@ -156,7 +171,7 @@ Stellar-field configuration (`StellarConfigTestCase`):
 | Test | What it checks | Input | Passes when |
 | --- | --- | --- | --- |
 | `StellarConfigTestCase.testPresetIsCrowdedPlusStellarSettings` | `CROWDED_STELLAR_FIELD_CONFIG` is `CROWDED_FIELD_CONFIG` plus the five validated settings, and `makeConfig` keeps them | the two presets | equal to `CROWDED_FIELD_CONFIG` + (psfStackIsoFwhm 1, psfStackMinSnr 30, psfStackN 80, ellipTest and keepExtended off); the library defaults unchanged |
-| `StellarConfigTestCase.testCommandLineConfigNames` | `crowdDetector.py --config` names point at the presets | `CONFIGS` of `bin.src/crowdDetector.py` | "stellar" → `CROWDED_STELLAR_FIELD_CONFIG`, "crowded" → `CROWDED_FIELD_CONFIG` |
+| `StellarConfigTestCase.testCommandLineConfigNames` | `crowdDetector.py --config` names point at the presets | `CONFIGS` of `bin.src/crowdDetector.py` | "stellar" → `CROWDED_STELLAR_FIELD_CONFIG`, "crowded" → `CROWDED_FIELD_CONFIG`, "fast" → `FAST_STELLAR_FIELD_CONFIG` (whose options are all valid; one pass) |
 
 ## test_diagnostics.py
 
@@ -226,6 +241,7 @@ real code.
 | `FitStitchTestCase.testRegionAndGaps` | A partial run | only the corner tile | 1 file; mosaic 200 × 167 px |
 | `FitStitchTestCase.testFailingTileDoesNotStopTask` | One failing tile | one tile raises an error | the other 8 written; the gap marked in the TILE map |
 | `FitStitchTestCase.testParallelWorkersSameAsSerial` | `fitTiles(nJobs=3)`: tiles fitted in forked worker processes | the synthetic 3 x 3-tile detector, one tile raising an error | 8 tile files and 9 logs; a rerun fits only the failed tile; the stitched model, tile map and catalogue equal a serial run's |
+| `FitStitchTestCase.testConfigSettingsNotOverridden` | `fitTiles` leaves the configuration's own `maxOuter` alone (the fast preset's single pass) | a configuration with `maxOuter=1`, then an explicit `maxOuter=2` | no `maxOuter` override in the first call (`maxInner` gets its default 15); the explicit 2 in the second |
 | `FitStitchTestCase.testPlot` | `plotDetector` | stitched mosaic; a zoom, greyscale, sources circled | PNG written; residual/σ spread ≈ 1; binning 1 for the zoom |
 | `FitStitchTestCase.testTile` | `loadTile`, `plotTile` | the corner tile | interior at (0, 0), width = interior + 20 px pad; `owned` count right; PNG written; residual/σ ≈ 1 |
 | `FitStitchTestCase.testResidualImages` | Tile files and the mosaic carry the residual images | the corner tile; its stitched mosaic | tiles have DATA, MODEL, RESIDUAL, RESIDUAL_SIGMA, VARIANCE, BAD; RESIDUAL = DATA − MODEL and RESIDUAL_SIGMA = RESIDUAL / √VARIANCE; the mosaic has RESIDUAL_SIGMA with scatter ≈ 1; `loadMosaic` / `loadTile` return `residSigma` |

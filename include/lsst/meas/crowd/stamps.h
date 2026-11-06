@@ -73,6 +73,21 @@ void renderStamps(double const *kernel, std::size_t ny, std::size_t nx, double c
                   double const *ys, std::size_t n, int order, bool taper, double t0, double t1,
                   double *out, long *x0, long *y0);
 
+/// Crop stamps (n x ny x nx, origins x0, y0) in place: for half > 0, zero beyond radius half
+/// around (x, y) with a cosine taper over the outer quarter (pipeline._cropStamp).
+void cropStamps(double *stamps, std::size_t n, std::size_t ny, std::size_t nx, long const *x0,
+                long const *y0, double const *xs, double const *ys, long const *halves);
+
+/// shiftImage restricted to output rows [r0, r1) and columns [c0, c1) (identical values there).
+void shiftWindow(double const *in, std::size_t ny, std::size_t nx, double dx, double dy, int order,
+                 long r0, long r1, long c0, long c1, double *out);
+
+/// renderDerivatives for one position, only over the stamp window rows [r0, r1), columns
+/// [c0, c1) (stamp-local indices); the values equal the full stamps' in that window.
+void renderDerivativesWindow(double const *kernel, std::size_t ny, std::size_t nx, double x,
+                             double y, int order, double eps, long r0, long r1, long c0, long c1,
+                             double *dx, double *dy);
+
 /**
  * Central-difference derivatives dP/dx, dP/dy (step eps) of the stamps of renderStamps (no
  * taper), all on the same origin as the centred stamp.

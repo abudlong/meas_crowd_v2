@@ -118,6 +118,23 @@ CROWDED_STELLAR_FIELD_CONFIG = dict(
     ellipTest=False, keepExtended=False,
 )
 
+# CROWDED_STELLAR_FIELD_CONFIG cut down for speed (about 10x faster per tile): one pass with the
+# visit PSF and background as given (no PSF / background refit), detection at 5 sigma and then
+# straight to the 3 sigma floor, at most 4 inner iterations, and none of the end-of-pass tests
+# (halo / ring fakes, position polish, pair split, galaxies), the shape cut or the noise / PSF-error
+# checks.  Bright-star correction terms are kept.  On LSSTCam detector 144, visit 2025062100433,
+# tile x1000_y1000: 12.8 s instead of 141 s; 91% of the full run's S/N > 20 sources recovered,
+# their psfMag 0.10 mag fainter (the full run refines the PSF wings) with 0.07 mag scatter.
+FAST_STELLAR_FIELD_CONFIG = dict(
+    CROWDED_STELLAR_FIELD_CONFIG,
+    maxOuter=1, minOuter=1, maxInner=4, thresholdStep=-2.0,
+    growFrac=1.0, growMin=10 ** 6, patience=1,
+    useShapeCut=False, refitPsf=False, wingsFromStars=False,
+    dropHaloMimics=False, dropRingMimics=False, splitTest=False, ellipTest=False,
+    finalPolish=False, autoPoisson=False, modelErrMeasure=False,
+    jointSolverTol=1e-6,
+)
+
 
 def _merge(dst, src, deep):
     """Merge ``src`` into ``dst`` (key by key for nested dicts when ``deep``) and return ``dst``."""

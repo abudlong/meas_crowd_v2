@@ -54,7 +54,8 @@ DEFAULT_OUT = ("/sdf/home/a/abudlong/project/repo-main-logs/crowdedFields/octobe
                "crowded_fields/8-detector144-stellarConfig")
 
 # --config names -> preset in lsst.meas.crowd.session
-CONFIGS = {"stellar": "CROWDED_STELLAR_FIELD_CONFIG", "crowded": "CROWDED_FIELD_CONFIG"}
+CONFIGS = {"stellar": "CROWDED_STELLAR_FIELD_CONFIG", "crowded": "CROWDED_FIELD_CONFIG",
+           "fast": "FAST_STELLAR_FIELD_CONFIG"}
 
 
 def _envInt(name, default):
@@ -86,10 +87,11 @@ def main(argv=None):
     f.add_argument("--region", type=int, nargs=4, metavar=("XMIN", "XMAX", "YMIN", "YMAX"))
     f.add_argument("--repo", default="dp2_prep")
     f.add_argument("--collection", default="LSSTCam/runs/DRP/DP2")
-    f.add_argument("--max-outer", type=int, default=3)
-    f.add_argument("--max-inner", type=int, default=15)
+    f.add_argument("--max-outer", type=int, default=None, help="default: the configuration's, else 3")
+    f.add_argument("--max-inner", type=int, default=None, help="default: the configuration's, else 15")
     f.add_argument("--config", default="stellar",
-                   help="stellar (default), crowded, or a JSON configuration file")
+                   help="stellar (default), crowded, fast (FAST_STELLAR_FIELD_CONFIG), or a JSON "
+                        "configuration file")
     f.add_argument("--plots", default="sample",
                    help="tiles to write all plots for: sample (default), all, none, or tile names "
                         "separated by commas")
@@ -129,7 +131,8 @@ def main(argv=None):
         detector.fitTiles(args.visit, args.detector, cfg, outDir=args.out, tile=args.tile, pad=args.pad,
                           taskIndex=args.task_index, nTasks=args.n_tasks, region=args.region,
                           repo=args.repo, collection=args.collection, overwrite=args.overwrite,
-                          maxOuter=args.max_outer, maxInner=args.max_inner,
+                          **{k: v for k, v in (("maxOuter", args.max_outer),
+                                               ("maxInner", args.max_inner)) if v is not None},
                           jointSolver=args.joint_solver, nJobs=args.n_jobs,
                           plots=_plots(args.plots), allSourcePages=args.all_source_pages)
     elif args.cmd == "stitch":

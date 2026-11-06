@@ -167,6 +167,78 @@ void renderStamps(double const *kernel, std::size_t ny, std::size_t nx, double c
     }
 }
 
+void cropStamps(double *stamps, std::size_t n, std::size_t ny, std::size_t nx, long const *x0,
+                long const *y0, double const *xs, double const *ys, long const *halves) {
+    // pipeline._cropStamp for each stamp with half > 0: zero beyond radius half around (x, y),
+    // cosine taper over the outer quarter
+    for (std::size_t i = 0; i < n; ++i) {
+        if (halves[i] <= 0) continue;
+        double const half = static_cast<double>(halves[i]), q = 0.25 * half;
+        double *o = stamps + i * ny * nx;
+        for (std::size_t r = 0; r < ny; ++r) {
+            double const dy = static_cast<double>(y0[i] + static_cast<long>(r)) - ys[i];
+            for (std::size_t c = 0; c < nx; ++c) {
+                double const dx = static_cast<double>(x0[i] + static_cast<long>(c)) - xs[i];
+                double w = (half - std::hypot(dx, dy)) / q;
+                w = std::min(std::max(w, 0.0), 1.0);
+                o[r * nx + c] *= 0.5 - 0.5 * std::cos(PI * w);
+            }
+        }
+    }
+}
+
+void shiftWindow(double const *in, std::size_t ny, std::size_t nx, double dx, double dy, int order,
+                 long r0, long r1, long c0, long c1, double *out) {
+    // Same arithmetic, element by element, as shiftImage restricted to rows [r0, r1) and
+    // columns [c0, c1): the y pass needs the x pass of rows r0 + fy .. r1 - 1 + fy + 2 order - 1.
+    int fx, fy;
+    std::vector<double> wx, wy;
+    lanczosWeights(dx, order, fx, wx);
+    lanczosWeights(dy, order, fy, wy);
+    long const nyl = static_cast<long>(ny), nxl = static_cast<long>(nx);
+    long const nw = static_cast<long>(wx.size()), nwy = static_cast<long>(wy.size());
+    long const wc = c1 - c0;
+    long const m0 = std::max(0L, r0 + fy), m1 = std::min(nyl, r1 - 1 + fy + nwy);
+    std::vector<double> tmp(static_cast<std::size_t>(std::max(0L, m1 - m0) * wc));
+    for (long m = m0; m < m1; ++m) {  // x pass of the needed rows, window columns only
+        double const *row = in + m * nxl;
+        double *t = tmp.data() + (m - m0) * wc;
+        for (long c = c0; c < c1; ++c) {
+            double s = 0.0;
+            for (long j = 0; j < nw; ++j) {
+                long const k = c + fx + j;
+                if (k >= 0 && k < nxl) s += wx[j] * row[k];
+            }
+            t[c - c0] = s;
+        }
+    }
+    for (long r = r0; r < r1; ++r) {  // y pass
+        double *o = out + (r - r0) * wc;
+        std::fill(o, o + wc, 0.0);
+        for (long j = 0; j < nwy; ++j) {
+            long const m = r + fy + j;
+            if (m < 0 || m >= nyl) continue;
+            double const w = wy[j];
+            double const *t = tmp.data() + (m - m0) * wc;
+            for (long c = 0; c < wc; ++c) o[c] += w * t[c];
+        }
+    }
+}
+
+void renderDerivativesWindow(double const *kernel, std::size_t ny, std::size_t nx, double x,
+                             double y, int order, double eps, long r0, long r1, long c0, long c1,
+                             double *dx, double *dy) {
+    double const fx = x - std::floor(x + 0.5), fy = y - std::floor(y + 0.5);
+    std::size_t const sz = static_cast<std::size_t>((r1 - r0) * (c1 - c0));
+    std::vector<double> p(sz), m(sz);
+    shiftWindow(kernel, ny, nx, fx + eps, fy, order, r0, r1, c0, c1, p.data());
+    shiftWindow(kernel, ny, nx, fx - eps, fy, order, r0, r1, c0, c1, m.data());
+    for (std::size_t k = 0; k < sz; ++k) dx[k] = (p[k] - m[k]) / (2 * eps);
+    shiftWindow(kernel, ny, nx, fx, fy + eps, order, r0, r1, c0, c1, p.data());
+    shiftWindow(kernel, ny, nx, fx, fy - eps, order, r0, r1, c0, c1, m.data());
+    for (std::size_t k = 0; k < sz; ++k) dy[k] = (p[k] - m[k]) / (2 * eps);
+}
+
 void renderDerivatives(double const *kernel, std::size_t ny, std::size_t nx, double const *xs,
                        double const *ys, std::size_t n, int order, double eps, double *dx,
                        double *dy, long *x0, long *y0) {

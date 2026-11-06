@@ -56,7 +56,8 @@ def findEigen():
 
 ext = Pybind11Extension(
     "lsst.meas.crowd._crowdLib",
-    ["python/lsst/meas/crowd/_crowdLib.cc", "src/stamps.cc", "src/sparseSolver.cc"],
+    ["python/lsst/meas/crowd/_crowdLib.cc", "src/stamps.cc", "src/sparseSolver.cc", "src/jointFit.cc",
+     "src/centroids.cc"],
     include_dirs=["include", findEigen()],
     cxx_std=17,
     extra_compile_args=["-O3", "-DNDEBUG"],
