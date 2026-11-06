@@ -302,5 +302,49 @@ class FitStitchTestCase(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.out, "detector_view.png")))
 
 
+class CpuLimitTestCase(unittest.TestCase):
+    """availableCpus honours container CPU quotas, which do not hide the node's cores."""
+
+    def _root(self, files):
+        tmp = tempfile.mkdtemp()
+        for rel, text in files.items():
+            os.makedirs(os.path.dirname(os.path.join(tmp, rel)), exist_ok=True)
+            with open(os.path.join(tmp, rel), "w") as fh:
+                fh.write(text)
+        return tmp
+
+    def testQuota(self):
+        with mock.patch.object(os, "sched_getaffinity", lambda pid: set(range(128))):
+            self.assertEqual(det.availableCpus(self._root({"cpu.max": "400000 100000\n"})), 4)
+            self.assertEqual(det.availableCpus(self._root({"cpu.max": "max 100000\n"})), 128)
+            self.assertEqual(det.availableCpus(self._root({"cpu/cpu.cfs_quota_us": "250000",
+                                                           "cpu/cpu.cfs_period_us": "100000"})), 2)
+            self.assertEqual(det.availableCpus(self._root({"cpu/cpu.cfs_quota_us": "-1",
+                                                           "cpu/cpu.cfs_period_us": "100000"})), 128)
+            self.assertEqual(det.availableCpus(self._root({})), 128)
+            self.assertEqual(det.availableCpus(self._root({"cpu.max": "50000 100000"})), 1)
+        with mock.patch.object(os, "sched_getaffinity", lambda pid: {0, 1}):
+            self.assertEqual(det.availableCpus(self._root({"cpu.max": "800000 100000"})), 2)
+
+    def testLimitBlasThreads(self):
+        try:
+            from threadpoolctl import threadpool_info, threadpool_limits
+        except ImportError:
+            self.skipTest("threadpoolctl not installed")
+        saved = {k: os.environ.get(k) for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                                                 "MKL_NUM_THREADS")}
+        try:
+            with threadpool_limits():                              # restored afterwards
+                self.assertEqual(det.limitBlasThreads(2, verbose=False), 2)
+                self.assertTrue(all(p["num_threads"] <= 2 for p in threadpool_info()))
+                self.assertEqual(os.environ["OPENBLAS_NUM_THREADS"], "2")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
 if __name__ == "__main__":
     unittest.main()

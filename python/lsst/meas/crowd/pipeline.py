@@ -1182,11 +1182,14 @@ def _refineSubsetPython(exposure, psf, S, fit, idx, maxShift, minAmp, freezeSep,
                 continue
         # only pixels within sqrt(R2) of the source are fitted: render the derivatives over a
         # window just covering them (identical values, far fewer pixels than the full stamp)
+        # (clipped to the exposure with integers: no Box2I.clip between boxes of possibly
+        # different types, e.g. a test exposure's box under the real stack)
         ix, iy = int(np.floor(x)), int(np.floor(y))
-        win = L.geom.Box2I(L.geom.Point2I(ix - rWin, iy - rWin), L.geom.Point2I(ix + rWin + 1, iy + rWin + 1))
-        win.clip(eb)
-        if win.isEmpty():
+        wx0, wy0 = max(ix - rWin, eb.getMinX()), max(iy - rWin, eb.getMinY())
+        wx1, wy1 = min(ix + rWin + 1, eb.getMaxX()), min(iy + rWin + 1, eb.getMaxY())
+        if wx0 > wx1 or wy0 > wy1:
             continue
+        win = L.geom.Box2I(L.geom.Point2I(wx0, wy0), L.geom.Point2I(wx1, wy1))
         dpdx, dpdy, bb = L.computePsfDerivatives(psf, x, y, win)
         if dpdx is None:
             continue

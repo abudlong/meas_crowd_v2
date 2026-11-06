@@ -67,7 +67,7 @@ _API = {
     "photometry": ["measurePhotometry", "compareWithGaia", "fluxToMag", "zeroPointFromRun",
                    "apertureFlux", "psfFluxErrors"],
     "sourcePlots": ["plotSourceCutouts", "sourceCutoutData"],
-    "detector": ["tileSpecs", "fitTiles", "stitchTiles", "loadMosaic", "loadTile",
+    "detector": ["availableCpus", "limitBlasThreads", "tileSpecs", "fitTiles", "stitchTiles", "loadMosaic", "loadTile",
                  "plotTile", "plotDetector", "saveTileProducts", "addTileResiduals"],
     "runPlots": ["saveRunPlots", "saveDetectorPlots", "showPsfStarStamps", "sampleTileNames"],
     "stagePlots": ["psfStarPositions", "showPsfStars", "showBackgrounds", "showRounds",

@@ -44,6 +44,7 @@ RESIDUAL = DATA - MODEL and RESIDUAL_SIGMA = RESIDUAL / sqrt(VARIANCE) (NaN on b
 __all__ = ["tileSpecs", "tileName", "saveTileProducts", "addTileResiduals", "fitTiles",
            "stitchTiles", "loadMosaic", "loadTile", "plotTile", "plotDetector"]
 
+import contextlib
 import glob
 import os
 import time
@@ -311,10 +312,11 @@ def fitTiles(visit, detector, config=None, outDir="detector_run", tile=400, pad=
         Directory for the plots (default ``<outDir>/plots``).
     allSourcePages : `bool`, optional
         Write a per-source page for every source of a plotted tile (default: 4 pages).
-    nJobs : `int`, optional
-        Fit this many tiles at once in forked worker processes (use the job's CPU count, e.g.
-        ``$SLURM_CPUS_PER_TASK``); each worker writes its tile file and its log
-        (``<outDir>/logs/<tile>.log``).  1 = one after another in this process.
+    nJobs : `int` or `str`, optional
+        Fit this many tiles at once in forked worker processes; each worker writes its tile file
+        and its log (``<outDir>/logs/<tile>.log``) and uses one BLAS thread.  ``"auto"``: the
+        usable CPUs (`availableCpus`, which honours container CPU quotas).  1 = one after another
+        in this process, with BLAS threads capped at the usable CPUs.
     **overrides
         Keyword arguments of ``runSessionGaia`` (e.g. ``maxOuter=3, maxInner=15``).
 
@@ -378,6 +380,8 @@ def fitTiles(visit, detector, config=None, outDir="detector_run", tile=400, pad=
                  allSourcePages=allSourcePages, visit=visit, detector=detector)
     tAll = time.perf_counter()
     names = [tileName(s) for s in todo]
+    if nJobs == "auto":
+        nJobs = availableCpus()
     if nJobs and nJobs > 1 and len(names) > 1:
         import multiprocessing as mp
         from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -393,13 +397,100 @@ def fitTiles(visit, detector, config=None, outDir="detector_run", tile=400, pad=
                 print(f"[{k + 1}/{len(names)}, {time.perf_counter() - tAll:6.0f} s] tile {name}: "
                       + (f"{nIn} sources, {secs:.0f} s" if ok else f"FAILED ({err}) -- rerun to retry"))
     else:
-        for k, name in enumerate(names):
-            print(f"\n######## tile {k + 1}/{len(names)}: {name}")
-            _fitTile(name)
+        try:                                     # no more BLAS threads than usable CPUs
+            from threadpoolctl import threadpool_limits
+            limit = threadpool_limits(availableCpus())
+        except ImportError:
+            limit = contextlib.nullcontext()
+        with limit:
+            for k, name in enumerate(names):
+                print(f"\n######## tile {k + 1}/{len(names)}: {name}")
+                _fitTile(name)
     _TILE.clear()
     print(f"\ntask {taskIndex + 1}/{nTasks}: {len(todo)} tile(s) in "
           f"{time.perf_counter() - tAll:.0f} s")
     return sorted(p for p in paths.values() if os.path.exists(p))
+
+
+# ---------------------------------------------------------------- CPUs
+def availableCpus(cgroupRoot="/sys/fs/cgroup"):
+    """Return the number of CPUs this process may actually use.
+
+    Container CPU limits (the RSP's notebook servers, Kubernetes) are set as a cgroup quota, not
+    by hiding cores: ``os.cpu_count()`` and even ``os.sched_getaffinity`` can show every core of
+    the node (e.g. 128) while the quota allows 4.  The quota is read from cgroup v2
+    (``cpu.max``) or v1 (``cpu/cpu.cfs_quota_us`` / ``cpu.cfs_period_us``); the smaller of it
+    and the visible CPUs is returned, at least 1.
+
+    Parameters
+    ----------
+    cgroupRoot : `str`, optional
+        Where the cgroup files are (for tests).
+
+    Returns
+    -------
+    n : `int`
+        Usable CPUs.
+    """
+    try:
+        visible = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        visible = os.cpu_count() or 1
+    quota = None
+    try:
+        with open(os.path.join(cgroupRoot, "cpu.max")) as fh:
+            q, p = fh.read().split()[:2]
+        if q != "max":
+            quota = int(q) / int(p)
+    except (OSError, ValueError):
+        try:
+            with open(os.path.join(cgroupRoot, "cpu", "cpu.cfs_quota_us")) as fh:
+                q = int(fh.read().strip())
+            with open(os.path.join(cgroupRoot, "cpu", "cpu.cfs_period_us")) as fh:
+                p = int(fh.read().strip())
+            if q > 0 and p > 0:
+                quota = q / p
+        except (OSError, ValueError):
+            pass
+    n = visible if quota is None else min(visible, int(quota))
+    return max(1, int(n))
+
+
+def limitBlasThreads(n=None, verbose=True):
+    """Cap the threads of NumPy's BLAS / OpenMP libraries in this process (default: the usable CPUs).
+
+    Under a cgroup CPU quota, BLAS libraries start one thread per *visible* core (128 on an RSP
+    node) for a quota of a few CPUs; the process is then throttled whenever it exceeds the quota,
+    which can slow everything down several times.  Call this once at the start of a notebook.
+
+    Parameters
+    ----------
+    n : `int`, optional
+        Thread cap (default `availableCpus`).
+    verbose : `bool`, optional
+        Print what was done.
+
+    Returns
+    -------
+    n : `int`
+        The cap applied (None if threadpoolctl is not installed: then only the environment
+        variables are set, which affects libraries loaded later).
+    """
+    n = int(n or availableCpus())
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ[var] = str(n)
+    try:
+        from threadpoolctl import threadpool_limits
+    except ImportError:
+        if verbose:
+            print(f"threadpoolctl not installed: set OMP/OPENBLAS/MKL_NUM_THREADS={n} for libraries "
+                  "loaded from now on")
+        return None
+    threadpool_limits(n)
+    if verbose:
+        print(f"BLAS / OpenMP threads capped at {n} (usable CPUs: {availableCpus()}, "
+              f"visible: {os.cpu_count()})")
+    return n
 
 
 # ---------------------------------------------------------------- fitting one tile

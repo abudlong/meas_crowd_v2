@@ -2,7 +2,7 @@
 
 Every public function and class of `lsst.meas.crowd`: what it does, its parameters (with types and defaults) and what it returns.  Generated from the docstrings by `doc/make_function_reference.py`; do not edit by hand (run `python doc/make_function_reference.py` after changing a docstring).  How the pipeline fits together is in [pipeline_guide.md](pipeline_guide.md); the output catalogue in [catalog_columns.md](catalog_columns.md).
 
-187 functions and 5 classes in 13 modules.  Everything listed here can be used as `crowd.<name>` after `import lsst.meas.crowd as crowd`, or from its module (`from lsst.meas.crowd import photometry`).  Names starting with `_` are internal helpers and are not listed.
+189 functions and 5 classes in 13 modules.  Everything listed here can be used as `crowd.<name>` after `import lsst.meas.crowd as crowd`, or from its module (`from lsst.meas.crowd import photometry`).  Names starting with `_` are internal helpers and are not listed.
 
 ## Start here
 
@@ -35,7 +35,7 @@ Every public function and class of `lsst.meas.crowd`: what it does, its paramete
 | [`plotting`](#plotting) | final data / model / residual plots and residual diagnostics | 9 |
 | [`stagePlots`](#stageplots) | plots of the intermediate stages and pass-to-pass comparison | 6 |
 | [`sourcePlots`](#sourceplots) | per-source cutouts, cross-sections and magnitudes | 3 |
-| [`detector`](#detector) | whole-detector runs: tiles, stitching, mosaic and tile plots | 10 |
+| [`detector`](#detector) | whole-detector runs: tiles, stitching, mosaic and tile plots | 12 |
 | [`runPlots`](#runplots) | write every plot of a run, of the detector-level PSF, or of chosen tiles | 4 |
 | [`fastKernels`](#fastkernels) | fast PSF stamps (C++ with a NumPy fallback) | 6 |
 | [`sparseSolver`](#sparsesolver) | the sparse joint-fit solver: pipe_crowd's Eigen LSCG with an x >= 0 active set | 4 |
@@ -2043,6 +2043,8 @@ Whole-detector runs: tile, fit, stitch.
 | [`addTileResiduals`](#detectoraddtileresiduals) | Add the RESIDUAL and RESIDUAL_SIGMA images to tile files written without them. |
 | [`saveTileProducts`](#detectorsavetileproducts) | Write one tile's results to a FITS file. |
 | [`fitTiles`](#detectorfittiles) | Fit this task's share of a detector's tiles and write one file per tile. |
+| [`availableCpus`](#detectoravailablecpus) | Return the number of CPUs this process may actually use. |
+| [`limitBlasThreads`](#detectorlimitblasthreads) | Cap the threads of NumPy's BLAS / OpenMP libraries in this process (default: the usable CPUs). |
 | [`stitchTiles`](#detectorstitchtiles) | Assemble the tile files into full-detector images and one catalogue. |
 | [`loadMosaic`](#detectorloadmosaic) | Read the files written by `stitchTiles`. |
 | [`loadTile`](#detectorloadtile) | Read one tile file written by `saveTileProducts`. |
@@ -2143,12 +2145,45 @@ Tiles already on disk are skipped, so the job can be restarted; a failing tile i
 | `plots` | `str` or `list` [`str`], optional | Tiles to write all plots for: None (no plots), 'sample' (the tiles at the corners, the centre and two edge midpoints, `lsst.meas.crowd.runPlots.sampleTileNames`), 'all', or a list of tile names. |
 | `plotDir` | `str`, optional | Directory for the plots (default ``<outDir>/plots``). |
 | `allSourcePages` | `bool`, optional | Write a per-source page for every source of a plotted tile (default: 4 pages). |
-| `nJobs` | `int`, optional | Fit this many tiles at once in forked worker processes (use the job's CPU count, e.g. ``$SLURM_CPUS_PER_TASK``); each worker writes its tile file and its log (``<outDir>/logs/<tile>.log``).  1 = one after another in this process. |
+| `nJobs` | `int` or `str`, optional | Fit this many tiles at once in forked worker processes; each worker writes its tile file and its log (``<outDir>/logs/<tile>.log``) and uses one BLAS thread.  ``"auto"``: the usable CPUs (`availableCpus`, which honours container CPU quotas).  1 = one after another in this process, with BLAS threads capped at the usable CPUs. |
 | `**overrides` | – | Keyword arguments of ``runSessionGaia`` (e.g. ``maxOuter=3, maxInner=15``). |
 
 | Returns | Type | Description |
 | --- | --- | --- |
 | `paths` | `list` [`str`] | Tile files of this task that exist. |
+
+### detector.availableCpus
+
+`availableCpus(cgroupRoot='/sys/fs/cgroup')`
+
+Return the number of CPUs this process may actually use.
+
+Container CPU limits (the RSP's notebook servers, Kubernetes) are set as a cgroup quota, not by hiding cores: ``os.cpu_count()`` and even ``os.sched_getaffinity`` can show every core of the node (e.g. 128) while the quota allows 4.  The quota is read from cgroup v2 (``cpu.max``) or v1 (``cpu/cpu.cfs_quota_us`` / ``cpu.cfs_period_us``); the smaller of it and the visible CPUs is returned, at least 1.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `cgroupRoot` | `str`, optional | Where the cgroup files are (for tests). |
+
+| Returns | Type | Description |
+| --- | --- | --- |
+| `n` | `int` | Usable CPUs. |
+
+### detector.limitBlasThreads
+
+`limitBlasThreads(n=None, verbose=True)`
+
+Cap the threads of NumPy's BLAS / OpenMP libraries in this process (default: the usable CPUs).
+
+Under a cgroup CPU quota, BLAS libraries start one thread per *visible* core (128 on an RSP node) for a quota of a few CPUs; the process is then throttled whenever it exceeds the quota, which can slow everything down several times.  Call this once at the start of a notebook.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `n` | `int`, optional | Thread cap (default `availableCpus`). |
+| `verbose` | `bool`, optional | Print what was done. |
+
+| Returns | Type | Description |
+| --- | --- | --- |
+| `n` | `int` | The cap applied (None if threadpoolctl is not installed: then only the environment variables are set, which affects libraries loaded later). |
 
 ### detector.stitchTiles
 
