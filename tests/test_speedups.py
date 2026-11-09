@@ -248,8 +248,9 @@ class _KernelPsf(lsstStubs.FakePsf):
 
     def computeImage(self, point):
         arr, b = self._fast.stamp(point[0], point[1], (-10 ** 8, -10 ** 8, 10 ** 8, 10 ** 8), None)
-        bb = Box2I(Point2I(int(b[0]), int(b[1])), Point2I(int(b[2]), int(b[3])))
-        return __import__("types").SimpleNamespace(array=arr, getBBox=lambda: Box2I(bb))
+        g = L.geom                  # the pipeline's geom (lsst.geom with the stack): same box type
+        bb = g.Box2I(g.Point2I(int(b[0]), int(b[1])), g.Point2I(int(b[2]), int(b[3])))
+        return __import__("types").SimpleNamespace(array=arr, getBBox=lambda: g.Box2I(bb))
 
 
 def _crowdedScene(n=150, nSrc=260, seed=5, half=20, sigma=1.8):
