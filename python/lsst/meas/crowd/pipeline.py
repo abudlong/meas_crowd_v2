@@ -165,7 +165,15 @@ PIPELINE_DEFAULTS = dict(
                                #   extrapolating the kernel's noisy 6-14 px profile
     skyTerms=0,               # fit a sky background in every joint fit, together with the fluxes:
                                #   0 none, 1 a constant, 3 a tilted plane; the fitted sky is
-                               #   subtracted from the working image after each fit
+                               #   subtracted from the working image after each fit.  In crowded
+                               #   fields it takes up wing light and unresolved stars (on LSSTCam
+                               #   det 144 it subtracted +3.3 counts where the sky is ~-4): prefer
+                               #   skyMedian
+    skyMedian=False,          # single-pass runs (fast preset): before every inner iteration and once
+                               #   at the end (followed by a flux refit), set the background to a
+                               #   tilted plane fitted to 32 px block medians of raw - model on the
+                               #   pixels where the model is < 0.5 sigma (away from bad pixels and
+                               #   saturated halos): the median sky between the stars becomes 0
     piffStampSize=25,         # refitPsf="piff": PIFF model stamp [px] (the visit PSF's is 25); the
                                #   wings beyond it come from wingsFromStars / psfWingSize as for the
                                #   other refits
@@ -790,6 +798,72 @@ def _jointFitWarm(exposure, psf, peakPositions, badBitmask, **kw):
         _SOLVER["positions"] = None
     _SOLVER["last"] = (xy, np.asarray(fit["amps"], float).copy(), id(exposure))
     return fit
+
+
+def _medianSkyPlane(resid, ok, block=32, minPix=64, clip=3.0, nIter=3):
+    """Fit a tilted plane to block medians of ``resid`` on the ``ok`` pixels.
+
+    Medians make the sky robust to the positive tail of faint, unmodelled stars in crowded fields
+    (a least-squares or clipped-mean fit is pulled up by it).  Blocks with fewer than ``minPix``
+    usable pixels are skipped; the plane is fitted to the block medians weighted by their pixel
+    counts, clipping blocks beyond ``clip`` x the robust scatter.  x and y are scaled to the image
+    size and centred (as `refitBackgroundLowfit`).
+
+    Parameters
+    ----------
+    resid : `numpy.ndarray`
+        Image to fit (raw - model).
+    ok : `numpy.ndarray` [`bool`]
+        Usable pixels.
+    block : `int`, optional
+        Block size [px].
+    minPix : `int`, optional
+        Minimum usable pixels per block.
+    clip : `float`, optional
+        Block clipping threshold.
+    nIter : `int`, optional
+        Clipping iterations.
+
+    Returns
+    -------
+    plane : `numpy.ndarray`
+        The plane over the image (zeros if fewer than 3 blocks).
+    coef : `numpy.ndarray`
+        (level at the centre, change across the width, change across the height).
+    nBlocks : `int`
+        Blocks used.
+    """
+    ny, nx = resid.shape
+    bx, by, med, cnt = [], [], [], []
+    for y0 in range(0, ny, block):
+        for x0 in range(0, nx, block):
+            sub = ok[y0:y0 + block, x0:x0 + block]
+            n = int(sub.sum())
+            if n < minPix:
+                continue
+            yy, xx = np.nonzero(sub)
+            med.append(np.median(resid[y0:y0 + block, x0:x0 + block][sub]))
+            bx.append(x0 + xx.mean())
+            by.append(y0 + yy.mean())
+            cnt.append(n)
+    coef = np.zeros(3)
+    if len(med) >= 3:
+        med, cnt = np.asarray(med), np.asarray(cnt, float)
+        X = np.column_stack([np.ones(len(med)), (np.asarray(bx) - nx / 2) / max(nx, 1),
+                             (np.asarray(by) - ny / 2) / max(ny, 1)])
+        use = np.ones(len(med), bool)
+        for _ in range(nIter):
+            w = np.sqrt(cnt[use])
+            coef = np.linalg.lstsq(X[use] * w[:, None], med[use] * w, rcond=None)[0]
+            r = med - X @ coef
+            s = 1.4826 * np.median(np.abs(r[use] - np.median(r[use])))
+            new = np.abs(r) <= clip * max(s, 1e-12)
+            if new.sum() < 3 or np.array_equal(new, use):
+                break
+            use = new
+    yy, xx = np.mgrid[:ny, :nx]
+    plane = coef[0] + coef[1] * (xx - nx / 2) / max(nx, 1) + coef[2] * (yy - ny / 2) / max(ny, 1)
+    return plane, coef, int(len(med))
 
 
 def _unboundedColumns(bounds, n):
@@ -2665,11 +2739,41 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
         print(f"  warm start: {len(S['xy'])} sources ({int(S['fromGaia'].sum())} Gaia), residual "
               f"std {hist['residStd'][0]:.3f}")
 
+    skyRaw = data.copy() if P["skyMedian"] else None      # the cutout as handed to this pass
+    if skyRaw is not None:
+        skyBits = 0
+        for name in BG_STATS_MASK:
+            if name != "DETECTED":
+                try:
+                    skyBits |= exposure.mask.getPlaneBitMask(name)
+                except Exception:
+                    pass
+        skyOk = ((exposure.mask.array & skyBits) == 0) & np.isfinite(skyRaw)
+        satm = (exposure.mask.array & exposure.mask.getPlaneBitMask("SAT")) != 0
+        if P["bgSatMaskFwhm"] and satm.any():
+            from scipy.ndimage import distance_transform_edt
+            skyOk &= distance_transform_edt(~satm) > P["bgSatMaskFwhm"] * fwhm
+        skySig = np.sqrt(np.where(exposure.variance.array > 0, exposure.variance.array, np.inf))
+
+    def updateSky(label):
+        """Set the working image to raw - (median sky plane of raw - model between the stars)."""
+        quiet = skyOk & (modelFull < 0.5 * skySig)
+        plane, coef, nb = _medianSkyPlane(skyRaw - modelFull, quiet)
+        data[:] = skyRaw - plane.astype(data.dtype)
+        print(f"  sky ({label}): {coef[0]:+.3f} (slopes {coef[1]:+.2f}, {coef[2]:+.2f} per width) "
+              f"from {nb} blocks of {int(quiet.sum())} px with model < 0.5 sigma")
+        return coef
+
+    skyCoef = np.zeros(3)
     for it in range(P["maxInner"]):
         times = {}
 
         def T(label):
             return timer.step(label, outer=outerIdx, inner=it)
+
+        if skyRaw is not None and fit is not None:
+            with T("sky (block medians)"):
+                skyCoef = updateSky("block medians")
 
         print(f"\n--- outer {outerIdx + 1} | inner {it + 1} (cap {P['maxInner']}) | "
               f"threshold={thr:.2f}σ | sources={len(S['xy'])} ---")
@@ -2886,6 +2990,15 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
     else:
         print(f"  WARNING: hit maxInner={P['maxInner']} while still working -- raise maxInner")
 
+    if skyRaw is not None and fit is not None:          # final sky for the final model, then fluxes
+        with timer.step("sky (block medians)", outer=outerIdx):
+            skyCoef = updateSky("final")
+            fit = _fit(exposure, psf, S, badBitmask, fit["modelFull"], fitkw)
+            modelFull = corrected(fit)
+            diag = check(fit, modelFull)
+            if snaps:
+                snaps[-1].update(fit=fit, residual=(data - modelFull).copy())
+
     if P["dropHaloMimics"] and fit is not None and snaps and len(S["xy"]):
         import contextlib
         import io
@@ -3000,7 +3113,7 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
                 nZeroAmpHistory=hist["nZero"], firstSeen=firstSeen, snaps=snaps,
                 S=S, isGaia=S["fromGaia"].copy(), gaiaIndex=S["gaia"].copy(),
                 adaptive=dict(final=diag, target=target, missing=finalMissing, stop=stop,
-                              log=log, nInner=len(log)))
+                              log=log, nInner=len(log)), skyPlane=skyCoef.copy())
 
 
 # =====================================================================

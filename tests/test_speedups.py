@@ -392,8 +392,39 @@ class SkyTermsTestCase(unittest.TestCase):
         np.testing.assert_allclose(exp.image.array, self.data - fit["skyImage"], atol=1e-4)
         resid = exp.image.array - fit["modelFull"]
         self.assertLess(abs(np.median(resid)), 1.0)
-        self.assertEqual(pl._params(__import__("lsst.meas.crowd.session", fromlist=["x"]).makeConfig(
-            __import__("lsst.meas.crowd.session", fromlist=["x"]).FAST_STELLAR_FIELD_CONFIG))["skyTerms"], 3)
+
+
+class MedianSkyTestCase(unittest.TestCase):
+    """`pipeline._medianSkyPlane`: a sky plane robust to faint unmodelled stars (skyMedian)."""
+
+    def testRecoversPlaneDespitePositiveTail(self):
+        n = 256
+        rng = np.random.default_rng(11)
+        yy, xx = np.mgrid[:n, :n]
+        plane = -4.0 + 3.0 * (xx - n / 2) / n - 1.5 * (yy - n / 2) / n
+        tail = rng.exponential(25.0, (n, n)) * (rng.uniform(size=(n, n)) < 0.15)   # faint stars
+        resid = plane + rng.normal(0, 20, (n, n)) + tail
+        ok = np.ones((n, n), bool)
+        ok[:, :40] = False                                        # a masked strip
+        fit, coef, nb = pl._medianSkyPlane(resid, ok)
+        np.testing.assert_allclose(coef[1:], [3.0, -1.5], atol=0.8)          # the tilt
+        meanBias = resid[ok].mean() - plane[ok].mean()                       # ~ +3.75: the tail
+        self.assertGreater(meanBias, 3.0)
+        self.assertLess(abs(coef[0] - (-4.0)), 0.7 * meanBias)               # the median: far less
+        self.assertEqual(nb, 8 * 7)                               # the masked strip's blocks are skipped
+        np.testing.assert_allclose(fit, coef[0] + coef[1] * (xx - n / 2) / n + coef[2] * (yy - n / 2) / n)
+
+    def testTooFewBlocks(self):
+        fit, coef, nb = pl._medianSkyPlane(np.ones((40, 40)), np.zeros((40, 40), bool))
+        self.assertEqual(nb, 0)
+        np.testing.assert_array_equal(coef, 0)
+        np.testing.assert_array_equal(fit, 0)
+
+    def testFastPreset(self):
+        from lsst.meas.crowd import session
+        P = pl._params(session.makeConfig(session.FAST_STELLAR_FIELD_CONFIG))
+        self.assertTrue(P["skyMedian"])
+        self.assertEqual(P["skyTerms"], 0)
 
 
 if __name__ == "__main__":

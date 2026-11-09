@@ -123,8 +123,8 @@ CROWDED_STELLAR_FIELD_CONFIG = dict(
 # straight to the 3 sigma floor, at most 4 inner iterations, and none of the end-of-pass tests
 # (halo / ring fakes, position polish, pair split, galaxies), the shape cut or the noise / PSF-error
 # checks.  Bright-star correction terms are kept.  With no background refit between passes, the
-# background is a tilted plane fitted together with the fluxes in every joint fit (skyTerms=3);
-# in crowded tiles it also takes up the light of stars too faint or blended to be fitted.  On LSSTCam detector 144, visit 2025062100433,
+# background is a tilted plane through 32 px block medians of raw - model where the model is
+# < 0.5 sigma, updated before every inner iteration and at the end (skyMedian).  On LSSTCam detector 144, visit 2025062100433,
 # tile x1000_y1000: 12.8 s instead of 141 s; 91% of the full run's S/N > 20 sources recovered,
 # their psfMag 0.10 mag fainter (the full run refines the PSF wings) with 0.07 mag scatter.
 FAST_STELLAR_FIELD_CONFIG = dict(
@@ -135,7 +135,7 @@ FAST_STELLAR_FIELD_CONFIG = dict(
     dropHaloMimics=False, dropRingMimics=False, splitTest=False, ellipTest=False,
     finalPolish=False, autoPoisson=False, modelErrMeasure=False,
     jointSolverTol=1e-6,
-    skyTerms=3,                  # the background: a tilted plane fitted with the fluxes in every fit
+    skyMedian=True,              # the background: a plane through the median sky between the stars
 )
 
 

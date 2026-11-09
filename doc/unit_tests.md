@@ -4,7 +4,7 @@ Every unit test in `tests/`: what it checks, what it feeds in, and what it must 
 pass.  How to run them and read the results is in the
 [pipeline guide](pipeline_guide.md#unit-tests-running-them-and-checking-the-results).
 
-The suite has **140 tests in 15 files**.  Without the Rubin stack 138 run and the 2 in
+The suite has **143 tests in 15 files**.  Without the Rubin stack 141 run and the 2 in
 `test_fastStampsStack.py` are skipped; `testCxxEqualsNumpy` is also skipped if the C++ extension
 was not built, and the `test_sparseSolver.py` solver tests if it was built without the
 sparse solver.  `test_docstrings.py` checks that this page lists every test and that the
@@ -103,7 +103,10 @@ The sped-up steps give the same answers as the code they replace.
 | `CxxLoopsTestCase.testDesignMatrixAndModel` | `jointPsfFitDiag` with the C++ matrix / group / model loops (`buildDesignMatrix`, `accumulateModel`) | the same scene with bad pixels, solved from the same start | identical matrix, groups, group map, masks, fluxes and model to the Python loops; group chi2 to 1e-12 |
 | `CxxLoopsTestCase.testCentroidStepSameAsPython` | `_refineSubset`'s per-source loop in C++ (`refineCentroids`) | the same scene, three sources marked extended | the same sources move, to the same positions (1e-9 px) as `_refineSubsetPython` |
 | `SkyTermsTestCase.testRecoversPlaneAndFluxes` | `jointPsfFitDiag(skyTerms=3)`: a sky plane fitted with the fluxes | 120 stars on a sky of -9 counts tilted (+4 across x, -2 across y), true positions and PSF | plane within 0.3 of (-9, 4, -2), sky image within 0.4, fluxes unbiased (median ratio within 1 %, 90 % within 6 %); the Eigen and scipy solvers agree |
-| `SkyTermsTestCase.testFitSubtractsSky` | `pipeline._fit` with sky terms | the same scene | the image becomes data - fitted sky, the residual's median is < 1 count; the fast preset uses `skyTerms=3` |
+| `SkyTermsTestCase.testFitSubtractsSky` | `pipeline._fit` with sky terms | the same scene | the image becomes data - fitted sky, the residual's median is < 1 count |
+| `MedianSkyTestCase.testRecoversPlaneDespitePositiveTail` | `_medianSkyPlane` (skyMedian) is robust to faint unmodelled stars | a tilted plane (-4, +3, -1.5) + noise + a positive exponential tail on 15 % of the pixels, a masked strip | the tilt within 0.8; the level's error below 0.7 x the plain mean's (which the tail pulls up by > 3); the masked strip's blocks skipped |
+| `MedianSkyTestCase.testTooFewBlocks` | No usable pixels | an all-masked image | no blocks, zero plane |
+| `MedianSkyTestCase.testFastPreset` | The fast preset's background | `FAST_STELLAR_FIELD_CONFIG` | `skyMedian` on, `skyTerms` 0 |
 
 ## test_psfRefit.py
 
