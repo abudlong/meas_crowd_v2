@@ -4,7 +4,7 @@ Every unit test in `tests/`: what it checks, what it feeds in, and what it must 
 pass.  How to run them and read the results is in the
 [pipeline guide](pipeline_guide.md#unit-tests-running-them-and-checking-the-results).
 
-The suite has **143 tests in 15 files**.  Without the Rubin stack 141 run and the 2 in
+The suite has **147 tests in 15 files**.  Without the Rubin stack 145 run and the 2 in
 `test_fastStampsStack.py` are skipped; `testCxxEqualsNumpy` is also skipped if the C++ extension
 was not built, and the `test_sparseSolver.py` solver tests if it was built without the
 sparse solver.  `test_docstrings.py` checks that this page lists every test and that the
@@ -106,7 +106,11 @@ The sped-up steps give the same answers as the code they replace.
 | `SkyTermsTestCase.testFitSubtractsSky` | `pipeline._fit` with sky terms | the same scene | the image becomes data - fitted sky, the residual's median is < 1 count |
 | `MedianSkyTestCase.testRecoversPlaneDespitePositiveTail` | `_medianSkyPlane` (skyMedian) is robust to faint unmodelled stars | a tilted plane (-4, +3, -1.5) + noise + a positive exponential tail on 15 % of the pixels, a masked strip | the tilt within 0.8; the level's error below 0.7 x the plain mean's (which the tail pulls up by > 3); the masked strip's blocks skipped |
 | `MedianSkyTestCase.testTooFewBlocks` | No usable pixels | an all-masked image | no blocks, zero plane |
-| `MedianSkyTestCase.testFastPreset` | The fast preset's background | `FAST_STELLAR_FIELD_CONFIG` | `skyMedian` on, `skyTerms` 0 |
+| `MedianSkyTestCase.testFastPreset` | The fast preset's background | `FAST_STELLAR_FIELD_CONFIG` | `skyMedian` "mesh", `skyTerms` 0, `skyInitial` off |
+| `MedianSkyMeshTestCase.testPlaneIsExactEdgesIncluded` | `_medianSkyMesh` leaves a plane exactly as it is | planes on 432 x 432, 432 x 373 and 100 x 64 images, smoothing 1 and 3 | equal to 1e-9 everywhere, edges and corners included |
+| `MedianSkyMeshTestCase.testFollowsADipThatAPlaneCannot` | The mesh follows background structure | a -50 count Gaussian dip (sigma 70 px) on -10, noise, a faint-star tail, a masked core | rms error < 4 counts and < 0.4 x the plane's; the masked core filled within 8 counts |
+| `MedianSkyMeshTestCase.testNoUsablePixels` | No usable pixels | an all-masked image | zero surface, no cells |
+| `MedianSkyMeshTestCase.testBadOption` | `skyMedian` is validated | "spline" | `ValueError` |
 
 ## test_psfRefit.py
 

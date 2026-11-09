@@ -424,8 +424,49 @@ class MedianSkyTestCase(unittest.TestCase):
     def testFastPreset(self):
         from lsst.meas.crowd import session
         P = pl._params(session.makeConfig(session.FAST_STELLAR_FIELD_CONFIG))
-        self.assertTrue(P["skyMedian"])
+        self.assertEqual(P["skyMedian"], "mesh")
         self.assertEqual(P["skyTerms"], 0)
+        self.assertFalse(P["skyInitial"])
+
+
+class MedianSkyMeshTestCase(unittest.TestCase):
+    """`pipeline._medianSkyMesh` (skyMedian="mesh"): a smooth background with structure."""
+
+    def testPlaneIsExactEdgesIncluded(self):
+        for ny, nx in ((432, 432), (432, 373), (100, 64)):
+            yy, xx = np.mgrid[:ny, :nx]
+            plane = 1000 + 500 * (xx / nx - 0.5) - 300 * (yy / ny - 0.5)
+            for smooth in (1, 3):
+                surf, grid, nb = pl._medianSkyMesh(plane, np.ones((ny, nx), bool), smooth=smooth)
+                self.assertEqual(nb, grid.size)
+                np.testing.assert_allclose(surf, plane, atol=1e-9)
+
+    def testFollowsADipThatAPlaneCannot(self):
+        n = 432
+        rng = np.random.default_rng(12)
+        yy, xx = np.mgrid[:n, :n]
+        sky = -10 - 50 * np.exp(-((xx - 150) ** 2 + (yy - 280) ** 2) / (2 * 70 ** 2))
+        tail = rng.exponential(20.0, (n, n)) * (rng.uniform(size=(n, n)) < 0.05)   # faint stars
+        resid = sky + rng.normal(0, 20, (n, n)) + tail
+        ok = np.ones((n, n), bool)
+        ok[200:260, 100:180] = False                              # a dense core: no usable pixels
+        mesh, _, _ = pl._medianSkyMesh(resid, ok)
+        plane, _, _ = pl._medianSkyPlane(resid, ok)
+        rmsMesh = np.sqrt(np.mean((mesh - sky) ** 2))
+        rmsPlane = np.sqrt(np.mean((plane - sky) ** 2))
+        self.assertLess(rmsMesh, 4.0)
+        self.assertLess(rmsMesh, 0.4 * rmsPlane)
+        self.assertLess(abs((mesh - sky)[200:260, 100:180].mean()), 8.0)   # the core is filled
+
+    def testNoUsablePixels(self):
+        surf, grid, nb = pl._medianSkyMesh(np.ones((64, 64)), np.zeros((64, 64), bool))
+        self.assertEqual(nb, 0)
+        np.testing.assert_array_equal(surf, 0)
+
+    def testBadOption(self):
+        with self.assertRaises(ValueError):
+            pl.runInnerAdaptive(None, None, 0, pl._state(np.zeros((0, 2))),
+                                dict(pl._params({}), skyMedian="spline"))
 
 
 if __name__ == "__main__":

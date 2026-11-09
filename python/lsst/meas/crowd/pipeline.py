@@ -170,10 +170,18 @@ PIPELINE_DEFAULTS = dict(
                                #   det 144 it subtracted +3.3 counts where the sky is ~-4): prefer
                                #   skyMedian
     skyMedian=False,          # single-pass runs (fast preset): before every inner iteration and once
-                               #   at the end (followed by a flux refit), set the background to a
-                               #   tilted plane fitted to 32 px block medians of raw - model on the
-                               #   pixels where the model is < 0.5 sigma (away from bad pixels and
-                               #   saturated halos): the median sky between the stars becomes 0
+                               #   at the end (followed by a flux refit), set the background from
+                               #   block medians of raw - model on the pixels where the model is <
+                               #   0.5 sigma (away from bad pixels and saturated halos), so the median
+                               #   sky between the stars becomes 0.  "plane" (or True): a tilted
+                               #   plane through them; "mesh": a smooth surface (blocks of skyMeshPx,
+                               #   3x3 median-filtered, bilinear) that follows a background with
+                               #   structure, e.g. the over-subtraction around dense star groups
+    skyMeshPx=32,             # skyMedian="mesh": block size [px]
+    skyMeshSmooth=3,          # skyMedian="mesh": median filter over this many cells (1 = none)
+    skyInitial=False,         # skyMedian: also estimate the sky before the first fit (block medians
+                               #   of the raw cutout); needed when the image still contains its sky,
+                               #   e.g. with the visit's own background added back
     piffStampSize=25,         # refitPsf="piff": PIFF model stamp [px] (the visit PSF's is 25); the
                                #   wings beyond it come from wingsFromStars / psfWingSize as for the
                                #   other refits
@@ -864,6 +872,86 @@ def _medianSkyPlane(resid, ok, block=32, minPix=64, clip=3.0, nIter=3):
     yy, xx = np.mgrid[:ny, :nx]
     plane = coef[0] + coef[1] * (xx - nx / 2) / max(nx, 1) + coef[2] * (yy - ny / 2) / max(ny, 1)
     return plane, coef, int(len(med))
+
+
+def _padLinear(grid, k=1):
+    """Pad a 2-d grid by ``k`` cells on each side, extrapolating linearly (a plane stays a plane)."""
+    ext = np.asarray(grid, float)
+    for _ in range(k):
+        ext = np.pad(ext, 1, mode="edge")
+        if ext.shape[0] > 3:
+            ext[0, :], ext[-1, :] = 2 * ext[1, :] - ext[2, :], 2 * ext[-2, :] - ext[-3, :]
+        if ext.shape[1] > 3:
+            ext[:, 0], ext[:, -1] = 2 * ext[:, 1] - ext[:, 2], 2 * ext[:, -2] - ext[:, -3]
+    return ext
+
+
+def _medianSkyMesh(resid, ok, block=32, minPix=64, smooth=3):
+    """A smooth background surface from cell medians of ``resid`` on the ``ok`` pixels.
+
+    The image is split into equal cells of about ``block`` px that cover it exactly.  Each cell
+    gets the median of its usable pixels (robust to faint unmodelled stars); cells with fewer than
+    ``minPix`` usable pixels (dense cores, masks) take the value of the nearest cell that has
+    enough; the grid is median-filtered over ``smooth`` x ``smooth`` cells after a linear
+    extension (a single noisy cell cannot make a bump, and a plane is left exactly as it is, edges
+    included) and interpolated bilinearly between the cell centres, extrapolating linearly to the
+    image edges.
+
+    Parameters
+    ----------
+    resid : `numpy.ndarray`
+        Image to fit (raw - model).
+    ok : `numpy.ndarray` [`bool`]
+        Usable pixels.
+    block : `int`, optional
+        Approximate cell size [px].
+    minPix : `int`, optional
+        Minimum usable pixels per cell.
+    smooth : `int`, optional
+        Median-filter size in cells (1 = none; odd).
+
+    Returns
+    -------
+    surface : `numpy.ndarray`
+        The background over the image (zeros if no cell has enough pixels).
+    grid : `numpy.ndarray`
+        The smoothed cell values.
+    nCells : `int`
+        Cells with enough usable pixels.
+    """
+    from scipy.ndimage import distance_transform_edt, map_coordinates, median_filter
+    ny, nx = resid.shape
+    gy, gx = max(1, int(round(ny / block))), max(1, int(round(nx / block)))
+    ey = np.linspace(0, ny, gy + 1).round().astype(int)
+    ex = np.linspace(0, nx, gx + 1).round().astype(int)
+    grid = np.full((gy, gx), np.nan)
+    for i in range(gy):
+        for j in range(gx):
+            sub = ok[ey[i]:ey[i + 1], ex[j]:ex[j + 1]]
+            if sub.sum() >= minPix:
+                grid[i, j] = np.median(resid[ey[i]:ey[i + 1], ex[j]:ex[j + 1]][sub])
+    have = np.isfinite(grid)
+    nCells = int(have.sum())
+    if nCells == 0:
+        return np.zeros((ny, nx)), np.zeros((gy, gx)), 0
+    if not have.all():                    # fill from the nearest cell with a value
+        _, (iy, ix) = distance_transform_edt(~have, return_indices=True)
+        grid = grid[iy, ix]
+    if smooth > 1:
+        k = int(smooth) // 2
+        grid = median_filter(_padLinear(grid, k), size=smooth)[k:-k, k:-k]
+    # interpolate between the true cell centres, with one extra (extrapolated) cell on each side
+    cy = (ey[:-1] + ey[1:] - 1) / 2.0
+    cx = (ex[:-1] + ex[1:] - 1) / 2.0
+    sy = cy[1] - cy[0] if gy > 1 else float(ny)
+    sx = cx[1] - cx[0] if gx > 1 else float(nx)
+    cyE = np.concatenate([[cy[0] - sy], cy, [cy[-1] + sy]])
+    cxE = np.concatenate([[cx[0] - sx], cx, [cx[-1] + sx]])
+    fy = np.interp(np.arange(ny), cyE, np.arange(gy + 2))
+    fx = np.interp(np.arange(nx), cxE, np.arange(gx + 2))
+    FY, FX = np.meshgrid(fy, fx, indexing="ij")
+    surface = map_coordinates(_padLinear(grid, 1), [FY, FX], order=1, mode="nearest")
+    return surface, grid, nCells
 
 
 def _unboundedColumns(bounds, n):
@@ -2650,6 +2738,8 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
         ``residualFull``, ``peaks``, ``amps``, histories, ``snaps``), plus ``S``,
         ``brightCorr``, ``adaptive`` (the loop decisions), ``isGaia`` and ``gaiaIndex``.
     """
+    if P["skyMedian"] not in (None, False, True, "plane", "mesh"):
+        raise ValueError(f"skyMedian must be False, 'plane' (True) or 'mesh', not {P['skyMedian']!r}")
     timer = timer or L.TIMER
     bbox = exposure.getBBox()
     ny, nx = bbox.getHeight(), bbox.getWidth()
@@ -2698,6 +2788,42 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
                                  haloFwhm=P["haloFwhm"], minSepFwhm=P["minSepFwhm"])
 
     fit, modelFull = None, np.zeros((ny, nx))
+    skyRaw = data.copy() if P["skyMedian"] else None      # the cutout as handed to this pass
+    if skyRaw is not None:
+        skyBits = 0
+        for name in BG_STATS_MASK:
+            if name != "DETECTED":
+                try:
+                    skyBits |= exposure.mask.getPlaneBitMask(name)
+                except Exception:
+                    pass
+        skyOk = ((exposure.mask.array & skyBits) == 0) & np.isfinite(skyRaw)
+        satm = (exposure.mask.array & exposure.mask.getPlaneBitMask("SAT")) != 0
+        if P["bgSatMaskFwhm"] and satm.any():
+            from scipy.ndimage import distance_transform_edt
+            skyOk &= distance_transform_edt(~satm) > P["bgSatMaskFwhm"] * fwhm
+        skySig = np.sqrt(np.where(exposure.variance.array > 0, exposure.variance.array, np.inf))
+
+    def updateSky(label):
+        """Set the working image to raw - (median sky of raw - model between the stars)."""
+        quiet = skyOk & (modelFull < 0.5 * skySig)
+        if P["skyMedian"] == "mesh":
+            plane, grid, nb = _medianSkyMesh(skyRaw - modelFull, quiet, block=int(P["skyMeshPx"]),
+                                             smooth=int(P["skyMeshSmooth"]))
+            coef = np.array([float(np.median(plane)), float(plane.min()), float(plane.max())])
+            print(f"  sky ({label}, mesh {P['skyMeshPx']} px): median {coef[0]:+.3f}, range "
+                  f"{coef[1]:+.2f} .. {coef[2]:+.2f}, from {nb}/{grid.size} cells of "
+                  f"{int(quiet.sum())} px with model < 0.5 sigma")
+        else:
+            plane, coef, nb = _medianSkyPlane(skyRaw - modelFull, quiet)
+            print(f"  sky ({label}): {coef[0]:+.3f} (slopes {coef[1]:+.2f}, {coef[2]:+.2f} per "
+                  f"width) from {nb} blocks of {int(quiet.sum())} px with model < 0.5 sigma")
+        data[:] = skyRaw - plane.astype(data.dtype)
+        return coef
+
+    skyCoef = np.zeros(3)
+    if skyRaw is not None and P["skyInitial"]:          # e.g. the visit's background added back:
+        skyCoef = updateSky("initial, nothing modelled yet")   # a first sky before the first fit
     hist = dict(residStd=[rstd(data)], nPeaks=[0], nZero=[0])
     snaps, firstSeen, log = [], {}, []
     bcorr = {}
@@ -2739,32 +2865,6 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
         print(f"  warm start: {len(S['xy'])} sources ({int(S['fromGaia'].sum())} Gaia), residual "
               f"std {hist['residStd'][0]:.3f}")
 
-    skyRaw = data.copy() if P["skyMedian"] else None      # the cutout as handed to this pass
-    if skyRaw is not None:
-        skyBits = 0
-        for name in BG_STATS_MASK:
-            if name != "DETECTED":
-                try:
-                    skyBits |= exposure.mask.getPlaneBitMask(name)
-                except Exception:
-                    pass
-        skyOk = ((exposure.mask.array & skyBits) == 0) & np.isfinite(skyRaw)
-        satm = (exposure.mask.array & exposure.mask.getPlaneBitMask("SAT")) != 0
-        if P["bgSatMaskFwhm"] and satm.any():
-            from scipy.ndimage import distance_transform_edt
-            skyOk &= distance_transform_edt(~satm) > P["bgSatMaskFwhm"] * fwhm
-        skySig = np.sqrt(np.where(exposure.variance.array > 0, exposure.variance.array, np.inf))
-
-    def updateSky(label):
-        """Set the working image to raw - (median sky plane of raw - model between the stars)."""
-        quiet = skyOk & (modelFull < 0.5 * skySig)
-        plane, coef, nb = _medianSkyPlane(skyRaw - modelFull, quiet)
-        data[:] = skyRaw - plane.astype(data.dtype)
-        print(f"  sky ({label}): {coef[0]:+.3f} (slopes {coef[1]:+.2f}, {coef[2]:+.2f} per width) "
-              f"from {nb} blocks of {int(quiet.sum())} px with model < 0.5 sigma")
-        return coef
-
-    skyCoef = np.zeros(3)
     for it in range(P["maxInner"]):
         times = {}
 
