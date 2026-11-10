@@ -240,14 +240,19 @@ class PiffFailureReportTestCase(unittest.TestCase):
                 log.info("star 2 flagged (level %d)", self.config.piffLoggingLevel)
                 raise RuntimeError("All stars are flagged.")
 
-        cfg = types.SimpleNamespace(piffLoggingLevel=0)
+        class Cfg(types.SimpleNamespace):
+            def validate(self):                        # this stack allows levels up to 2
+                if self.piffLoggingLevel > 2:
+                    raise ValueError("piffLoggingLevel out of range")
+
+        cfg = Cfg(piffLoggingLevel=0)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             pl._piffWhy(Task, cfg, None, [], dict)
         out = buf.getvalue()
         self.assertIn("2 distinct; rerun failed: RuntimeError", out)
         self.assertIn("piff.test WARNING: Failed to initialize star 1", out)
-        self.assertIn("star 2 flagged (level 3)", out)
+        self.assertIn("star 2 flagged (level 2)", out)
         self.assertEqual(logging.getLogger().handlers.count(None), 0)
 
     def testNeverRaises(self):

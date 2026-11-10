@@ -3407,8 +3407,15 @@ def _piffWhy(task, cfg, exposure, cands, PropertyList, maxLines=40):
     root.setLevel(logging.DEBUG)
     err = None
     try:
-        if hasattr(cfg, "piffLoggingLevel"):
-            cfg.piffLoggingLevel = 3
+        if hasattr(cfg, "piffLoggingLevel"):       # the highest level this stack's config allows
+            for level in (3, 2, 1):
+                try:
+                    cfg.piffLoggingLevel = level
+                    if hasattr(cfg, "validate"):
+                        cfg.validate()
+                    break
+                except Exception:
+                    continue
         task(config=cfg).determinePsf(exposure, cands, PropertyList())
     except Exception as e:
         err = e
@@ -3427,6 +3434,42 @@ def _piffWhy(task, cfg, exposure, cands, PropertyList, maxLines=40):
         print("    | " + line[:300])
     if len(lines) > maxLines:
         print(f"    | ... {len(lines) - maxLines} more")
+
+
+def _hsmCheck(exposure, xy, stamp, maxShow=5):
+    """Measure every star's adaptive moments (GalSim HSM, as PIFF does when it sets a star up) and
+    print how many fail and why."""
+    try:
+        import galsim
+    except ImportError:
+        print("    (GalSim not available: no HSM check)")
+        return
+    box = exposure.getBBox()
+    X0, Y0 = box.getMinX(), box.getMinY()
+    img, var = exposure.image.array, exposure.variance.array
+    ny, nx = img.shape
+    h = stamp // 2
+    ok, fails, sigmas = 0, [], []
+    for x, y in np.asarray(xy, float):
+        ix, iy = int(round(x)) - X0, int(round(y)) - Y0
+        if ix - h < 0 or iy - h < 0 or ix + h >= nx or iy + h >= ny:
+            fails.append((x, y, "stamp beyond the cutout"))
+            continue
+        sub = np.ascontiguousarray(img[iy - h:iy + h + 1, ix - h:ix + h + 1], float)
+        w = np.ascontiguousarray(1.0 / np.where(var[iy - h:iy + h + 1, ix - h:ix + h + 1] > 0,
+                                                 var[iy - h:iy + h + 1, ix - h:ix + h + 1], np.inf))
+        try:
+            m = galsim.hsm.FindAdaptiveMom(galsim.Image(sub), weight=galsim.Image(w), strict=True)
+            ok += 1
+            sigmas.append(m.moments_sigma)
+        except Exception as e:
+            fails.append((x, y, f"{type(e).__name__}: {str(e).splitlines()[0][:120]}"))
+    msg = f"    HSM moments (as PIFF measures them): {ok} ok"
+    if sigmas:
+        msg += f" (sigma median {np.median(sigmas):.2f} px)"
+    print(msg + f", {len(fails)} failed")
+    for x, y, why in fails[:maxShow]:
+        print(f"      ({x:.1f}, {y:.1f}): {why}")
 
 
 def _piffFailureReport(exposure, xy, stamp, cfg):
@@ -3456,6 +3499,7 @@ def _piffFailureReport(exposure, xy, stamp, cfg):
               f"{np.median(sums):.4g}, {negs} with sum <= 0; variance in stamps min {var.min():.4g}, "
               f"median {np.median(var):.4g}, {int((~(var > 0)).sum())} px not > 0")
         print("    mask planes set in the stars' stamps: " + (", ".join(planes) or "none"))
+        _hsmCheck(exposure, xy, stamp)
         bad = getattr(cfg, "badMaskPlanes", None)
         if bad is not None:
             print(f"    PIFF ignores pixels with: {list(bad)}")
