@@ -592,7 +592,8 @@ class StellarConfigTestCase(unittest.TestCase):
         self.assertIs(getattr(session, ns["CONFIGS"]["fast"]), session.FAST_STELLAR_FIELD_CONFIG)
         P = __import__("lsst.meas.crowd.pipeline", fromlist=["x"])._params(
             session.makeConfig(session.FAST_STELLAR_FIELD_CONFIG))   # every fast option is valid
-        self.assertEqual(P["maxOuter"], 1)
+        self.assertEqual((P["maxOuter"], P["minOuter"]), (2, 2))   # pass, PIFF refit, pass
+        self.assertEqual(P["refitPsf"], "piff")
 
 
 if __name__ == "__main__":

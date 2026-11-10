@@ -191,12 +191,35 @@ class RefitPsfPiffWiringTestCase(unittest.TestCase):
                 self.assertIsNotNone(fp)
                 self.assertEqual(fp.spans.radius, 12)
                 np.testing.assert_allclose(fp.peaks[0][:2], (x, y))
-                self.assertEqual(fp.spans.center, (int(round(x)), int(round(y))))
+                c = fp.spans.center                  # a stub or an lsst.geom Point2I
+                self.assertEqual((int(c[0]), int(c[1])), (int(round(x)), int(round(y))))
             np.testing.assert_allclose(seen["candidateImage"], pl.psfStarImage(exp, fit, idx),
                                        atol=1e-3)
             with mock.patch.object(pl, "selectPsfStars", lambda *a, **k: idx[:3]):
                 with self.assertRaises(RuntimeError):                  # too few stars
                     pl.refitPsfPiff(exp, psf, res, P, (60.0, 60.0), verbose=False)
+
+
+class RefitPsfOptionTestCase(unittest.TestCase):
+    """PIFF is the pipeline's only PSF refit."""
+
+    def testValues(self):
+        self.assertEqual(pl._params({})["refitPsf"], "piff")
+        self.assertEqual(pl._params(dict(refitPsf=True))["refitPsf"], "piff")
+        self.assertFalse(pl._params(dict(refitPsf=False))["refitPsf"])
+        for gone in ("stack", "pca"):
+            with self.assertRaises(ValueError):
+                pl._params(dict(refitPsf=gone))
+
+    def testPresets(self):
+        from lsst.meas.crowd import session
+        for cfg in (session.CROWDED_FIELD_CONFIG, session.CROWDED_STELLAR_FIELD_CONFIG,
+                    session.FAST_STELLAR_FIELD_CONFIG):
+            self.assertEqual(pl._params(session.makeConfig(cfg))["refitPsf"], "piff")
+
+    def testRemovedRefits(self):
+        for name in ("refinePsfClean", "refinePsfSpatial"):
+            self.assertFalse(hasattr(pl, name))
 
 
 if __name__ == "__main__":

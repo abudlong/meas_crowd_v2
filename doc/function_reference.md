@@ -2,7 +2,7 @@
 
 Every public function and class of `lsst.meas.crowd`: what it does, its parameters (with types and defaults) and what it returns.  Generated from the docstrings by `doc/make_function_reference.py`; do not edit by hand (run `python doc/make_function_reference.py` after changing a docstring).  How the pipeline fits together is in [pipeline_guide.md](pipeline_guide.md); the output catalogue in [catalog_columns.md](catalog_columns.md).
 
-191 functions and 5 classes in 13 modules.  Everything listed here can be used as `crowd.<name>` after `import lsst.meas.crowd as crowd`, or from its module (`from lsst.meas.crowd import photometry`).  Names starting with `_` are internal helpers and are not listed.
+189 functions and 5 classes in 13 modules.  Everything listed here can be used as `crowd.<name>` after `import lsst.meas.crowd as crowd`, or from its module (`from lsst.meas.crowd import photometry`).  Names starting with `_` are internal helpers and are not listed.
 
 ## Start here
 
@@ -28,7 +28,7 @@ Every public function and class of `lsst.meas.crowd`: what it does, its paramete
 
 | Module | Role | Public functions / classes |
 | --- | --- | --- |
-| [`pipeline`](#pipeline) | the driver: run the pipeline on cutouts from Gaia starting positions, inner / outer loops, PSF refinement, diagnostics | 44 |
+| [`pipeline`](#pipeline) | the driver: run the pipeline on cutouts from Gaia starting positions, inner / outer loops, PSF refinement, diagnostics | 42 |
 | [`session`](#session) | load a visit, cut out regions, set up the PSF; configuration; saving runs | 19 |
 | [`gaiaCatalog`](#gaiacatalog) | the Gaia catalogue and the starting positions of each cutout | 4 |
 | [`photometry`](#photometry) | PSF and aperture photometry, errors, the Gaia comparison | 9 |
@@ -74,14 +74,12 @@ Adaptive, iterative joint PSF-fitting pipeline starting from Gaia positions.
 | [`psfStarImage`](#pipelinepsfstarimage) | Return the image with every source's model subtracted except the PSF stars ``idx``. |
 | [`refitPsfPiff`](#pipelinerefitpsfpiff) | Refit the PSF with PIFF (the Rubin pipelines' PSF determiner) on neighbour-subtracted stars. |
 | [`selectPsfStars`](#pipelineselectpsfstars) | Select clean, bright, isolated, unsaturated point sources for the PSF stack. |
-| [`refinePsfClean`](#pipelinerefinepsfclean) | Update the PSF from the residual stack of clean stars, cross-validated. |
 | [`refinePsfMedian`](#pipelinerefinepsfmedian) | Correct the PSF core with the median residual/flux of the bright clean stars. |
 | [`smoothPsfKernel`](#pipelinesmoothpsfkernel) | Return a hole-free, smooth version of a PSF kernel. |
 | [`regularizePsf`](#pipelineregularizepsf) | Return the PSF with its kernel passed through `smoothPsfKernel`. |
 | [`extendPsfWingsKeep`](#pipelineextendpsfwingskeep) | Extend a PSF with a Moffat tail, optionally keeping its angular structure. |
 | [`wingProfilePsf`](#pipelinewingprofilepsf) | Return a PSF whose outer wings are measured from the stars. |
 | [`spatialKernelPsf`](#pipelinespatialkernelpsf) | Build a linearly varying LSST PSF. |
-| [`refinePsfSpatial`](#pipelinerefinepsfspatial) | Add or update a linear spatial variation of the PSF, cross-validated. |
 | [`fitBrightnessTerm`](#pipelinefitbrightnessterm) | Measure or update the brightness-dependent PSF term (brighter-fatter). |
 | [`refitBackgroundLowfit`](#pipelinerefitbackgroundlowfit) | Fit a constant or tilted-plane background to the unmasked pixels and subtract it in place. |
 | [`printTiming`](#pipelineprinttiming) | Print the time spent per pipeline step. |
@@ -564,29 +562,6 @@ Select clean, bright, isolated, unsaturated point sources for the PSF stack.
 | --- | --- | --- |
 | `idx` | `numpy.ndarray` [`int`] | Indices of the selected stars, brightest first. |
 
-### pipeline.refinePsfClean
-
-`refinePsfClean(exposure, psf, res, badBitmask, P, fitkw, nCycles=3, verbose=True)`
-
-Update the PSF from the residual stack of clean stars, cross-validated.
-
-The clean stars are split into two halves A and B (alternating in brightness).  Each cycle builds a correction from A and judges it on B's pixels, and vice versa; only if the held-out chi2 improves by at least ``psfCvMinGain`` is the correction from all stars applied.  This stops the PSF absorbing the pixel noise of its own stars, which shows up as speckle around every bright star.  Corrections are smoothed (``psfSmoothPx``) and soft-thresholded (``psfSoftSigma``).
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `exposure` | `lsst.afw.image.Exposure` | The fitted exposure. |
-| `psf` | `lsst.afw.detection.Psf` | Current PSF. |
-| `res` | `dict` | Result of `runInnerAdaptive`. |
-| `badBitmask` | `int` | Mask bits of pixels to ignore. |
-| `P` | `dict` | Pipeline options. |
-| `fitkw` | `dict` | Keyword arguments of the joint fit. |
-| `nCycles` | `int`, optional | Maximum number of correction cycles. |
-| `verbose` | `bool`, optional | Print each cycle. |
-
-| Returns | Type | Description |
-| --- | --- | --- |
-| `psf` | `lsst.afw.detection.Psf` | The updated PSF (the input PSF if no cycle was kept). |
-
 ### pipeline.refinePsfMedian
 
 `refinePsfMedian(exposure, psf, res, badBitmask, P, fitkw, fit0=None, verbose=True)`
@@ -707,30 +682,6 @@ Build a linearly varying LSST PSF.
 | Returns | Type | Description |
 | --- | --- | --- |
 | `psf` | `lsst.meas.algorithms.KernelPsf` | The spatially varying PSF. |
-
-### pipeline.refinePsfSpatial
-
-`refinePsfSpatial(exposure, psfOld, psfNew, res, badBitmask, P, fitkw, step=0.8, verbose=True)`
-
-Add or update a linear spatial variation of the PSF, cross-validated.
-
-Measured from the clean stars' residuals in ``res`` (fitted with ``psfOld``); the gradient from half A is judged on half B and vice versa, and kept only if the held-out chi2 drops by at least ``psfSpatialMinGain`` compared with the constant ``psfNew``.
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `exposure` | `lsst.afw.image.Exposure` | The fitted exposure. |
-| `psfOld` | `lsst.afw.detection.Psf` | PSF the residuals were fitted with. |
-| `psfNew` | `lsst.afw.detection.Psf` | Constant PSF to add the variation to. |
-| `res` | `dict` | Result of `runInnerAdaptive`. |
-| `badBitmask` | `int` | Mask bits of pixels to ignore. |
-| `P` | `dict` | Pipeline options (``psf_spatial_*``). |
-| `fitkw` | `dict` | Keyword arguments of the joint fit. |
-| `step` | `float`, optional | Fraction of the measured gradient applied. |
-| `verbose` | `bool`, optional | Print the result. |
-
-| Returns | Type | Description |
-| --- | --- | --- |
-| `psf` | `lsst.afw.detection.Psf` | The varying PSF, or ``psfNew`` if the variation was not kept. |
 
 ### pipeline.fitBrightnessTerm
 

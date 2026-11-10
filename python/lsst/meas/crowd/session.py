@@ -58,7 +58,7 @@ DEFAULT_CONFIG = dict(
     refineCentroids=True,
     centroidMinAmp=50.0,
     nCentroidRounds=3,
-    refitPsf="stack",
+    refitPsf="piff",
     stackKwargs=dict(nUse=12, step=0.8, window=(0.85, 1.0), maxRadius=20),
     psfPolishCycles=3,
     psfKernelSizes=(41, 27, 21, 15, 11),
@@ -118,8 +118,10 @@ CROWDED_STELLAR_FIELD_CONFIG = dict(
     ellipTest=False, keepExtended=False,
 )
 
-# CROWDED_STELLAR_FIELD_CONFIG cut down for speed (about 10x faster per tile): one pass with the
-# visit PSF and background as given (no PSF / background refit), detection at 5 sigma and then
+# CROWDED_STELLAR_FIELD_CONFIG cut down for speed: two passes, the first with the visit PSF, then
+# a PIFF refit of the PSF on the pass's neighbour-subtracted clean stars and a second pass with it
+# (on det 144 the visit PSF is wrong in the corners: with the refit, bottom-right went from 713 to
+# 969 sources and residual/sigma on the stars from -0.15 to -0.005).  In each pass detection at 5 sigma and then
 # straight to the 3 sigma floor, at most 4 inner iterations, and none of the end-of-pass tests
 # (halo / ring fakes, position polish, pair split, galaxies), the shape cut or the noise / PSF-error
 # checks.  Bright-star correction terms are kept.  With no background refit between passes, the
@@ -132,9 +134,9 @@ CROWDED_STELLAR_FIELD_CONFIG = dict(
 # their psfMag 0.10 mag fainter (the full run refines the PSF wings) with 0.07 mag scatter.
 FAST_STELLAR_FIELD_CONFIG = dict(
     CROWDED_STELLAR_FIELD_CONFIG,
-    maxOuter=1, minOuter=1, maxInner=4, thresholdStep=-2.0,
+    maxOuter=2, minOuter=2, maxInner=4, thresholdStep=-2.0,
     growFrac=1.0, growMin=10 ** 6, patience=1,
-    useShapeCut=False, refitPsf=False, wingsFromStars=False,
+    useShapeCut=False, refitPsf="piff", wingsFromStars=False,
     dropHaloMimics=False, dropRingMimics=False, splitTest=False, ellipTest=False,
     finalPolish=False, autoPoisson=False, modelErrMeasure=False,
     jointSolverTol=1e-6,

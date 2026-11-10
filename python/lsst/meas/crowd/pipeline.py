@@ -111,11 +111,6 @@ PIPELINE_DEFAULTS = dict(
     #   minSnr): real stars survive, halo/spike speckle does not.
     #   The residual check ignores the zones. satZoneFwhm=0 -> off
     satZoneMinPx=4,         # ignore saturated blobs smaller than this (hot pixels, CRs)
-    psfSpatial=False,         # let the PSF vary LINEARLY across the cutout (kernel gradient in x
-    #   and y, measured from the clean stars); kept only if it lowers
-    #   chi2 on those stars by >= psfSpatialMinGain
-    psfSpatialMinGain=0.02,
-    psfSpatialMinStars=10,
     psfCvMinGain=0.005,     # PSF updates are CROSS-VALIDATED: built from half the clean stars,
     #   judged on the other half (both ways); kept only if the held-out
     #   chi2 drops by >= this fraction (stops the PSF fitting noise)
@@ -196,7 +191,7 @@ PIPELINE_DEFAULTS = dict(
                                #   wings beyond it come from wingsFromStars / psfWingSize as for the
                                #   other refits
     piffSpatialOrder=1,       # refitPsf="piff": polynomial order of PIFF's variation over a cutout
-    piffMinStars=10,          # refitPsf="piff": fewer clean stars -> residual-stack refit instead
+    piffMinStars=10,          # refitPsf="piff": fewer clean stars -> the pass's PSF is kept
     bgMode="plane",           # background refit between passes: "plane" (tilted plane, sigma-clipped),
                                #   "constant", "spline" (SubtractBackgroundTask surface on bgBinSize
                                #   bins -- can swing by 100s of counts in the corners of a small,
@@ -283,7 +278,7 @@ _LIB_DEFAULTS = dict(
     brightPeakSigma=100.0, freezeFwhm=1.0, poissonK=0.0, nearBrightFwhm=2.0,
     nearBrightSnr=10.0, edgeMarginFwhm=0.5, useEliminateWeak=True,
     useShapeCut=True, shapeKwargs=None, shapeInFirstPass=False,
-    refitPsf=True, stackKwargs=None, psfPolishCycles=3, psfKernelSize=41,
+    refitPsf="piff", stackKwargs=None, psfPolishCycles=3, psfKernelSize=41,
     psfKernelSizes=None, bgBinSize=32, bgUseApprox=True, psfWingSize=81,
 )
 
@@ -319,6 +314,11 @@ def _params(cfg):
     if P["thresholdStep"] >= 0:
         P["thresholdStep"] = -abs(P["thresholdStep"]) or -1.0
     P["tFloor"] = min(P["tFloor"], P["thresholdMin"])
+    if P["refitPsf"] is True:                   # the PSF refit between passes is PIFF's
+        P["refitPsf"] = "piff"
+    if P["refitPsf"] not in (None, False, "piff"):
+        raise ValueError(f"refitPsf must be 'piff' or False, not {P['refitPsf']!r} (the residual-"
+                         f"stack and re-detection refits were removed: PIFF does better)")
     return P
 
 
@@ -3456,102 +3456,6 @@ def _chi2On(exposure, f, m):
                          / exposure.variance.array[m])) if m.any() else np.nan
 
 
-def refinePsfClean(exposure, psf, res, badBitmask, P, fitkw, nCycles=3, verbose=True):
-    """Update the PSF from the residual stack of clean stars, cross-validated.
-
-    The clean stars are split into two halves A and B (alternating in brightness).  Each cycle
-    builds a correction from A and judges it on B's pixels, and vice versa; only if the held-out
-    chi2 improves by at least ``psfCvMinGain`` is the correction from all stars applied.  This
-    stops the PSF absorbing the pixel noise of its own stars, which shows up as speckle around
-    every bright star.  Corrections are smoothed (``psfSmoothPx``) and soft-thresholded
-    (``psfSoftSigma``).
-
-    Parameters
-    ----------
-    exposure : `lsst.afw.image.Exposure`
-        The fitted exposure.
-    psf : `lsst.afw.detection.Psf`
-        Current PSF.
-    res : `dict`
-        Result of `runInnerAdaptive`.
-    badBitmask : `int`
-        Mask bits of pixels to ignore.
-    P : `dict`
-        Pipeline options.
-    fitkw : `dict`
-        Keyword arguments of the joint fit.
-    nCycles : `int`, optional
-        Maximum number of correction cycles.
-    verbose : `bool`, optional
-        Print each cycle.
-
-    Returns
-    -------
-    psf : `lsst.afw.detection.Psf`
-        The updated PSF (the input PSF if no cycle was kept).
-    """
-    from scipy.ndimage import gaussian_filter
-    bb = exposure.getBBox()
-    c = bb.getCenter()
-    fwhm = L._fwhm(psf, c)
-    psfPeak = psf.computeKernelImage(c).array.max()
-    noise = float(np.sqrt(np.nanmedian(exposure.variance.array)))
-    idx = selectPsfStars(exposure, res, fwhm, psfPeak, noise, P, verbose)
-    if len(idx) < 6:
-        print(f"  PSF stack: {len(idx)} clean star(s) -- too few to cross-validate, PSF not updated")
-        return psf
-    S = res["S"]
-    fit = res["snaps"][-1]["fit"]
-    data = exposure.image.array
-    X0, Y0 = bb.getMinX(), bb.getMinY()
-    A, B = idx[0::2], idx[1::2]
-    mA = _starMask(data.shape, X0, Y0, S["xy"][A], 2.5 * fwhm)
-    mB = _starMask(data.shape, X0, Y0, S["xy"][B], 2.5 * fwhm)
-    skw = dict(P["stackKwargs"] or {})
-    skw.setdefault("softSigma", P["psfSoftSigma"])
-    sc = 0.5 * max(bb.getWidth(), bb.getHeight())
-
-    def correctedKernel(kernel, sel, f):
-        new, _ = L.estimatePsfCorrection(data, f["modelFull"], f["variance"], f["good"],
-                                         (X0, Y0), S["xy"][sel], f["amps"][sel], kernel,
-                                         **dict(skw, nUse=len(sel)))
-        d = gaussian_filter(new - kernel, P["psfSmoothPx"]) if P["psfSmoothPx"] else new - kernel
-        out = kernel + d
-        return out / out.sum()
-
-    def asPsf(k, like):
-        prev = _SPATIAL.get(id(like))
-        if prev is not None and prev[0] is like and prev[1].shape == k.shape:
-            return spatialKernelPsf(k, prev[1], prev[2], c.getX(), c.getY(), sc)
-        return L.kernelToLsstPsf(k)
-
-    cur = psf
-    for cyc in range(max(1, nCycles)):
-        kernel = cur.computeKernelImage(c).array.copy()
-        try:
-            fA = _fit(exposure, asPsf(correctedKernel(kernel, A, fit), cur), S, badBitmask,
-                      fit["modelFull"], fitkw)
-            fB = _fit(exposure, asPsf(correctedKernel(kernel, B, fit), cur), S, badBitmask,
-                      fit["modelFull"], fitkw)
-        except ValueError as e:
-            print(f"    PSF cycle {cyc + 1}: {e}")
-            break
-        before = _chi2On(exposure, fit, mB) + _chi2On(exposure, fit, mA)
-        after = _chi2On(exposure, fA, mB) + _chi2On(exposure, fB, mA)
-        gain = (before - after) / max(before, 1e-12)
-        keep = gain >= P["psfCvMinGain"]
-        if verbose:
-            print(f"    PSF cycle {cyc + 1}/{nCycles}: held-out chi2/px on {len(idx)} PSF stars "
-                  f"{before / 2:.2f} -> {after / 2:.2f} ({100 * gain:+.1f}%) "
-                  f"({'kept' if keep else 'rejected, stopping'})")
-        if not keep:
-            break
-        cand = asPsf(correctedKernel(kernel, idx, fit), cur)
-        fit = _fit(exposure, cand, S, badBitmask, fit["modelFull"], fitkw)
-        cur = cand
-    return cur
-
-
 def _residualStack(resid, good, xy, amps, idx, X0, Y0, half, withErr=False):
     """Return the median residual/flux of stars on a grid centred on each (and optionally its error).
 
@@ -4098,99 +4002,6 @@ def _psfGradient(data, model, var, good, xy0, pos, amps, kernel, xc, yc, scale,
     return out[0], out[1], len(R)
 
 
-def refinePsfSpatial(exposure, psfOld, psfNew, res, badBitmask, P, fitkw, step=0.8,
-                     verbose=True):
-    """Add or update a linear spatial variation of the PSF, cross-validated.
-
-    Measured from the clean stars' residuals in ``res`` (fitted with ``psfOld``); the gradient
-    from half A is judged on half B and vice versa, and kept only if the held-out chi2 drops by at
-    least ``psfSpatialMinGain`` compared with the constant ``psfNew``.
-
-    Parameters
-    ----------
-    exposure : `lsst.afw.image.Exposure`
-        The fitted exposure.
-    psfOld : `lsst.afw.detection.Psf`
-        PSF the residuals were fitted with.
-    psfNew : `lsst.afw.detection.Psf`
-        Constant PSF to add the variation to.
-    res : `dict`
-        Result of `runInnerAdaptive`.
-    badBitmask : `int`
-        Mask bits of pixels to ignore.
-    P : `dict`
-        Pipeline options (``psf_spatial_*``).
-    fitkw : `dict`
-        Keyword arguments of the joint fit.
-    step : `float`, optional
-        Fraction of the measured gradient applied.
-    verbose : `bool`, optional
-        Print the result.
-
-    Returns
-    -------
-    psf : `lsst.afw.detection.Psf`
-        The varying PSF, or ``psfNew`` if the variation was not kept.
-    """
-    from scipy.ndimage import gaussian_filter
-    bb = exposure.getBBox()
-    c = bb.getCenter()
-    xc, yc = c.getX(), c.getY()
-    scale = 0.5 * max(bb.getWidth(), bb.getHeight())
-    fwhm = L._fwhm(psfNew, c)
-    K0 = psfNew.computeKernelImage(c).array.astype(float).copy()
-    noise = float(np.sqrt(np.nanmedian(exposure.variance.array)))
-    idx = selectPsfStars(exposure, res, fwhm, K0.max(), noise, P, verbose=False)
-    S, fit = res["S"], res["snaps"][-1]["fit"]
-    pos = S["xy"][idx]
-    if len(idx) < P["psfSpatialMinStars"] or np.std(pos[:, 0]) < 0.15 * scale \
-            or np.std(pos[:, 1]) < 0.15 * scale:
-        if verbose:
-            print(f"  spatial PSF: {len(idx)} clean star(s), too few / too clustered -- constant PSF")
-        return psfNew
-    prev = _SPATIAL.get(id(psfOld))
-    Kx0, Ky0 = (prev[1], prev[2]) if (prev is not None and prev[0] is psfOld
-                                      and prev[1].shape == K0.shape) else (np.zeros_like(K0),) * 2
-    data = exposure.image.array
-    X0, Y0 = bb.getMinX(), bb.getMinY()
-    mr = (P["stackKwargs"] or {}).get("maxRadius", 20)
-
-    def grad(sel):
-        bx, by, _ = _psfGradient(data, fit["modelFull"], fit["variance"], fit["good"], (X0, Y0),
-                                 S["xy"][sel], fit["amps"][sel], K0, xc, yc, scale,
-                                 maxRadius=mr, softSigma=P["psfSoftSigma"])
-        if bx is None:
-            return None
-        if P["psfSmoothPx"]:
-            bx, by = gaussian_filter(bx, P["psfSmoothPx"]), gaussian_filter(by, P["psfSmoothPx"])
-        return spatialKernelPsf(K0, Kx0 + step * bx, Ky0 + step * by, xc, yc, scale)
-
-    A, B = idx[0::2], idx[1::2]
-    mA = _starMask(data.shape, X0, Y0, S["xy"][A], 2.5 * fwhm)
-    mB = _starMask(data.shape, X0, Y0, S["xy"][B], 2.5 * fwhm)
-    try:
-        cA, cB = grad(A), grad(B)
-    except Exception as e:
-        print(f"  spatial PSF: could not build ({type(e).__name__}: {e}) -- constant PSF")
-        return psfNew
-    if cA is None or cB is None:
-        return psfNew
-    f0 = _fit(exposure, psfNew, S, badBitmask, fit["modelFull"], fitkw)
-    fA = _fit(exposure, cA, S, badBitmask, fit["modelFull"], fitkw)
-    fB = _fit(exposure, cB, S, badBitmask, fit["modelFull"], fitkw)
-    before = _chi2On(exposure, f0, mB) + _chi2On(exposure, f0, mA)
-    after = _chi2On(exposure, fA, mB) + _chi2On(exposure, fB, mA)
-    gain = (before - after) / max(before, 1e-12)
-    keep = gain >= P["psfSpatialMinGain"]
-    if verbose:
-        print(f"  spatial PSF from {len(idx)} clean stars (cross-validated): held-out chi2/px "
-              f"{before / 2:.2f} (constant) -> {after / 2:.2f} (varying), {100 * gain:+.1f}% "
-              f"-> {'KEPT' if keep else 'not kept'}")
-    if not keep:
-        return psfNew
-    return grad(idx)
-
-
 def fitBrightnessTerm(exposure, psf, res, badBitmask, P, fitkw, verbose=True):
     """Measure or update the brightness-dependent PSF term (brighter-fatter).
 
@@ -4565,10 +4376,6 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
             S["ref"] += (dx, dy)
     print(f"{len(S['xy'])} Gaia starting position(s) for cutout {cb}")
 
-    starpos = None
-    if starCat is not None and len(starCat):
-        starpos = [(r.getX(), r.getY()) for r in starCat
-                   if cb.contains(L.geom.Point2I(int(round(r.getX())), int(round(r.getY()))))]
     psfW, bgW, psfChange = psf, None, np.nan
     hist = []
     for k in range(P["maxOuter"]):
@@ -4680,45 +4487,14 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
                 print(f"  background refit failed ({type(e).__name__}: {e}) -- keeping image")
         psfNew = psfW
         expN.setPsf(psfW)
-        if P["refitPsf"] == "stack":
-            with L.TIMER.step("PSF refit (residual stack)", outer=k):
-                try:
-                    psfNew = refinePsfClean(
-                        expW, psfW, res, badBitmask, P,
-                        dict(supportFrac=P["supportFrac"], sysFrac=P["sysFrac"],
-                             poissonK=P["poissonK"]),
-                        nCycles=P["psfPolishCycles"])
-                except Exception as e:
-                    print(f"  residual-stack PSF refit failed ({type(e).__name__}: {e})")
-                    psfNew = psfW
-        elif P["refitPsf"] == "piff":
+        if P["refitPsf"]:
             with L.TIMER.step("PSF refit (PIFF)", outer=k):
                 try:
                     psfNew = refitPsfPiff(expW, psfW, res, P, c)
                 except Exception as e:
-                    print(f"  PIFF PSF refit failed ({type(e).__name__}: {e}) -- residual-stack "
-                          f"refit instead")
-                    try:
-                        psfNew = refinePsfClean(
-                            expW, psfW, res, badBitmask, P,
-                            dict(supportFrac=P["supportFrac"], sysFrac=P["sysFrac"],
-                                 poissonK=P["poissonK"]),
-                            nCycles=P["psfPolishCycles"])
-                    except Exception as e2:
-                        print(f"  residual-stack PSF refit failed ({type(e2).__name__}: {e2})")
-                        psfNew = psfW
-        elif P["refitPsf"]:
-            ks = P["psfKernelSizes"] or tuple([P["psfKernelSize"]] +
-                                              [s for s in (27, 21, 15, 11) if s < P["psfKernelSize"]])
-            with L.TIMER.step("redetect + PSF refit", outer=k):
-                try:
-                    p_, _, _, cell, _ = L.redetectAndRefitPsfAdaptive(
-                        expN, kernelSizes=ks, extraPeakPositions=res["peaks"],
-                        forceIncludeStarPositions=starpos)
-                    if cell is not None:
-                        psfNew = p_
-                except Exception as e:
-                    print(f"  PSF redetermination failed ({type(e).__name__}: {e})")
+                    print(f"  PIFF PSF refit failed ({type(e).__name__}: {e}) -- keeping the "
+                          f"pass's PSF")
+                    psfNew = psfW
         if P["psfWingSize"]:
             wp = None
             if P["wingsFromStars"]:
@@ -4728,8 +4504,6 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
                     print(f"  wings from stars failed ({type(e).__name__}: {e})")
             if wp is not None:
                 psfNew = wp
-            elif P["wingsFromStars"] and psfNew is not psfW and P["refitPsf"] == "stack":
-                pass                       # stack-refined PSF keeps its current (embedded) wings
             elif psfNew is not psfW:
                 psfNew = extendPsfWingsKeep(psfNew, c, P["psfWingSize"], blend=P["psfExtBlend"],
                                             keepAngular=P["wingKeepAngular"])
@@ -4743,14 +4517,6 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
                         fit0=res["snaps"][-1]["fit"] if psfNew is psfW else None)
                 except Exception as e:
                     print(f"  PSF core (median stack) failed ({type(e).__name__}: {e})")
-        if P["psfSpatial"] and P["refitPsf"] == "stack":
-            try:
-                psfNew = refinePsfSpatial(
-                    expW, psfW, psfNew, res, badBitmask, P,
-                    dict(supportFrac=P["supportFrac"], sysFrac=P["sysFrac"],
-                         poissonK=P["poissonK"]))
-            except Exception as e:
-                print(f"  spatial PSF failed ({type(e).__name__}: {e}) -- constant PSF")
         if psfNew is not psfW:
             psfNew = regularizePsf(psfNew, c, P)
         psfChange = _kernelChange(psfW, psfNew, c) if psfNew is not psfW else 0.0

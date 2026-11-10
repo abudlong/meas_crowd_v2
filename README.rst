@@ -60,8 +60,8 @@ PSF source
 image is already background-subtracted.  ``psfSource="refit"`` subtracts a background, detects
 stars, selects them by size and fits a PCA PSF; the background (``session.bgImage``) is then
 subtracted in pass 1, and the candidate and used stars are kept (``session.starCat``,
-``session.psfUsedXy``).  Either way the PSF is refined inside each cutout between passes
-(``refitPsf="stack"``).
+``session.psfUsedXy``).  Either way the PSF is refitted inside each cutout between passes with
+PIFF (``refitPsf="piff"``, the only refit), on the pass's neighbour-subtracted clean stars.
 
 Layout
 ======
@@ -299,15 +299,15 @@ Fast mode and parallel tiles
 ----------------------------
 
 ``FAST_STELLAR_FIELD_CONFIG`` (``crowdDetector.py fit --config fast``) is
-``CROWDED_STELLAR_FIELD_CONFIG`` cut down for speed: one pass with the visit PSF and background as
-given, detection at 5 sigma then straight to 3 sigma, at most 4 inner iterations, bright-star
-terms kept, and the end-of-pass tests, shape cut and noise / PSF-error checks off.  As it makes no
-background refit between passes, the background is a plane through 32 px block medians of
-raw - model between the stars, updated before every inner iteration and at the end
-(``skyMedian``).  Fitting the sky together with the fluxes (``skyTerms``) is also available but
-absorbs wing light and unresolved stars in crowded fields.  On one
-LSSTCam tile it took 12.8 s instead of 141 s, recovered 91 % of the full run's S/N > 20 sources,
-and measured them 0.10 mag fainter (the full run refines the PSF wings) with 0.07 mag scatter.
+``CROWDED_STELLAR_FIELD_CONFIG`` cut down for speed: two passes, the first with the visit PSF,
+then a PIFF refit of the PSF and a second pass with it; in each, detection at 5 sigma then straight
+to 3 sigma, at most 4 inner iterations, bright-star terms kept, and the end-of-pass tests, shape
+cut and noise / PSF-error checks off.  The background is a smooth mesh (32 px cells) through the
+sky between the stars (25th percentile + 0.674 sigma per cell, twice with a flux refit between),
+updated before every inner iteration and at the end (``skyMedian="mesh"``): the visit image's
+background is over-subtracted around dense star groups.  On LSSTCam detector 144 the visit PSF is
+wrong in the corners; the PIFF refit took the bottom-right corner from 713 to 969 sources and the
+residual on the stars from -0.15 to -0.005 sigma, at about twice the time of one pass.
 ``fitTiles(..., nJobs=N)`` (``--n-jobs``) fits N tiles at once in worker processes.
 
 The per-source loops of the joint fit run in C++ (``src/jointFit.cc``: the design matrix, source

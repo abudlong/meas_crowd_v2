@@ -315,32 +315,28 @@ because the visit image is already background-subtracted: only a small residual 
 a flexible surface (`bgMode="spline"`) can swing by hundreds of counts in a mostly masked corner
 of a small cutout.
 
-**PSF update** (`refitPsf="stack"`).  *Why:* the visit PSF is an average over the detector; the
-stars in the cutout tell what the PSF is here.
+**PSF update: PIFF** (`refitPsf="piff"`, the only refit).  *Why:* the visit PSF is an average
+over the detector; the stars in the cutout tell what the PSF is here.  On LSSTCam detector 144 the
+visit PSF is wrong in the corners (residual on the stars -0.15 sigma, ring residuals around bright
+stars); the PIFF refit removes both and lets the fit find ~35 % more sources there.  It also beat
+the residual-stack refit used before (bottom-right scatter 1.12 vs 1.30), which was removed.
 
 1. **Clean stars:** up to 25 (`psfStackN`) point sources with S/N ≥ 50, no saturated pixel
    within 3 FWHM, no neighbour brighter than 10 % of them within 2.5 FWHM, not near a removed
    halo / ring fake, away from the edge.
-2. **Correction:** the stars' residuals ÷ flux, stacked, give the PSF's shape error; it is
-   smoothed (0.6 px), small values below 2σ per pixel are ignored, and it is added to the kernel.
-3. **Cross-validated:** the stars are split into two halves; a correction built from one half
-   must lower χ² on the other half's pixels by ≥ 0.5 % (`psfCvMinGain`), both ways.  Otherwise
-   it is rejected.  This stops the PSF absorbing its own stars' noise (which would show up as
-   speckle around every bright star).  Repeated up to 3 cycles (`psfPolishCycles`).
-4. **Wings from the stars** (`wingsFromStars`): neighbour-subtracted radial profiles of bright
-   unsaturated stars (S/N ≥ 300) give the outer profile; saturated stars extend it outward; a
-   Moffat fitted to it replaces the kernel beyond 2–3 FWHM.
-5. **Regularise** again (as in step 3) and measure the change for the convergence test.
+2. **Neighbour-subtracted image:** every other source's model is subtracted (`psfStarImage`), so
+   each clean star stands alone.
+3. **PIFF** (`lsst.meas.extensions.piff`): each star becomes a PSF candidate at its fitted
+   position, with a circular footprint and peak (the stack's candidate code needs them), and
+   `PiffPsfDeterminerTask` fits the model (stamp `piffStampSize` = 25 px, spatial order
+   `piffSpatialOrder` = 1 over the cutout).
+4. **Wings from the stars** (`wingsFromStars`) or the Moffat extension (`psfWingSize`), then the
+   regularisation, and the change is measured for the convergence test.
 
-**Alternative: PIFF** (`refitPsf="piff"`).  The visit PSF is a PIFF model; instead of the
-residual stack, PIFF itself (`lsst.meas.extensions.piff`) can be refitted: the same clean stars
-are left alone on the image with every other source's model subtracted (`psfStarImage`) and given
-to `PiffPsfDeterminerTask` at their fitted positions (stamp `piffStampSize` = 25 px, spatial order
-`piffSpatialOrder` = 1 over the cutout).  Wings and regularisation follow as above.  With fewer
-than `piffMinStars` = 10 stars, or if PIFF fails, the residual stack is used.
+With fewer than `piffMinStars` = 10 clean stars, or if PIFF fails, the pass's PSF is kept.
 
-Off by default (they did not help on the test data): a linearly varying PSF (`psfSpatial`), a
-median-stack core correction (`psfCoreMedian`) and a brightness-dependent PSF (`bfTerm`).
+Off by default (they did not help on the test data): a median-stack core correction
+(`psfCoreMedian`) and a brightness-dependent PSF (`bfTerm`).
 
 ## 7. Outputs: photometry and the Gaia comparison
 
