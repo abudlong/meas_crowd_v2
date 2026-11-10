@@ -3378,6 +3378,7 @@ def refitPsfPiff(exposure, psf, res, P, point, verbose=True):
     except Exception:
         if verbose:
             _piffFailureReport(clean, res["S"]["xy"][idx], stamp, cfg)
+            _piffWhy(PiffPsfDeterminerTask, cfg, clean, cands, PropertyList)
         raise
     psfNew = out[0] if isinstance(out, tuple) else out
     if verbose:
@@ -3385,6 +3386,47 @@ def refitPsfPiff(exposure, psf, res, P, point, verbose=True):
               f"spatial order {cfg.spatialOrder}, stamp {stamp} px; FWHM {fwhm:.3f} -> "
               f"{L._fwhm(psfNew, point):.3f} px")
     return psfNew
+
+
+def _piffWhy(task, cfg, exposure, cands, PropertyList, maxLines=40):
+    """Rerun a failed PIFF fit with PIFF's own logging on and print what it says about the stars.
+
+    PIFF reports why it flags a star through Python logging, which the pipeline's log does not
+    capture; this collects it (distinct lines, at most ``maxLines``) and prints it.
+    """
+    import io
+    import logging
+    import sys
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(logging.Formatter("%(name)s %(levelname)s: %(message)s"))
+    root = logging.getLogger()
+    oldLevel = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    err = None
+    try:
+        if hasattr(cfg, "piffLoggingLevel"):
+            cfg.piffLoggingLevel = 3
+        task(config=cfg).determinePsf(exposure, cands, PropertyList())
+    except Exception as e:
+        err = e
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(oldLevel)
+    seen, lines = set(), []
+    for line in buf.getvalue().splitlines():
+        key = line.strip()
+        if key and key not in seen and not key.startswith(("matplotlib", "PIL", "asyncio")):
+            seen.add(key)
+            lines.append(line)
+    print(f"  PIFF's own messages on the rerun ({len(lines)} distinct; rerun "
+          f"{'failed: ' + type(err).__name__ if err else 'succeeded'}):", file=sys.stdout)
+    for line in lines[:maxLines]:
+        print("    | " + line[:300])
+    if len(lines) > maxLines:
+        print(f"    | ... {len(lines) - maxLines} more")
 
 
 def _piffFailureReport(exposure, xy, stamp, cfg):

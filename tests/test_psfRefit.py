@@ -224,6 +224,32 @@ class PiffFailureReportTestCase(unittest.TestCase):
         self.assertIn("PIFF ignores pixels with: ['BAD', 'SAT']", out)
         self.assertIn("PIFF modelSize = 25", out)
 
+    def testPiffWhyCollectsLogging(self):
+        import contextlib
+        import io
+        import logging
+
+        class Task:
+            def __init__(self, config):
+                self.config = config
+
+            def determinePsf(self, exposure, cands, metadata):
+                log = logging.getLogger("piff.test")
+                log.warning("Failed to initialize star 1: flagged")
+                log.warning("Failed to initialize star 1: flagged")         # a repeat
+                log.info("star 2 flagged (level %d)", self.config.piffLoggingLevel)
+                raise RuntimeError("All stars are flagged.")
+
+        cfg = types.SimpleNamespace(piffLoggingLevel=0)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            pl._piffWhy(Task, cfg, None, [], dict)
+        out = buf.getvalue()
+        self.assertIn("2 distinct; rerun failed: RuntimeError", out)
+        self.assertIn("piff.test WARNING: Failed to initialize star 1", out)
+        self.assertIn("star 2 flagged (level 3)", out)
+        self.assertEqual(logging.getLogger().handlers.count(None), 0)
+
     def testNeverRaises(self):
         import contextlib
         import io
