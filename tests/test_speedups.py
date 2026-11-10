@@ -379,6 +379,23 @@ class SkyTermsTestCase(unittest.TestCase):
         np.testing.assert_allclose(fit["sky"], ref["sky"], atol=1e-3)
         np.testing.assert_allclose(fit["amps"], ref["amps"], rtol=1e-4, atol=1e-2)
 
+    def testMeshSkyFollowsADip(self):
+        """skyMeshPx: a smooth sky with a dip, fitted with the fluxes."""
+        yy, xx = np.mgrid[:self.n, :self.n]
+        dip = -25.0 * np.exp(-((xx - 60) ** 2 + (yy - 90) ** 2) / (2 * 35.0 ** 2))
+        exp = lsstStubs.FakeExposure(self.data + dip, self.var.copy())
+        pl.enableSpeedups()
+        pl._SOLVER["last"] = None
+        try:
+            with mock.patch.object(L, "psfStamp", self.stamp):
+                fit = L.jointPsfFitDiag(exp, None, [tuple(p) for p in self.xy], 0, skyMeshPx=32)
+        finally:
+            pl.disableSpeedups()
+        truth = self.sky + dip
+        self.assertLess(np.sqrt(np.mean((fit["skyImage"] - truth) ** 2)), 2.0)
+        ratio = fit["amps"] / self.flux
+        self.assertLess(abs(np.median(ratio) - 1), 0.015)
+
     def testFitSubtractsSky(self):
         """`pipeline._fit` leaves background-subtracted data and a sources-only model."""
         exp = lsstStubs.FakeExposure(self.data.copy(), self.var.copy())
@@ -427,6 +444,11 @@ class MedianSkyTestCase(unittest.TestCase):
         self.assertEqual(P["skyMedian"], "mesh")
         self.assertEqual(P["skyTerms"], 0)
         self.assertFalse(P["skyInitial"])
+        self.assertEqual(P["skyStat"], "q25")
+        self.assertEqual(P["skyRounds"], 2)
+        self.assertEqual(P["skyMeshSmooth"], 1)
+        self.assertEqual(P["skyJointMeshPx"], 0)
+        self.assertEqual(P["detectLocalBgPx"], 16)
 
 
 class MedianSkyMeshTestCase(unittest.TestCase):
@@ -467,6 +489,54 @@ class MedianSkyMeshTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             pl.runInnerAdaptive(None, None, 0, pl._state(np.zeros((0, 2))),
                                 dict(pl._params({}), skyMedian="spline"))
+        with self.assertRaises(ValueError):
+            pl.runInnerAdaptive(None, None, 0, pl._state(np.zeros((0, 2))),
+                                dict(pl._params({}), skyMedian="mesh", skyStat="mode"))
+
+
+class SkyLevelTestCase(unittest.TestCase):
+    """`pipeline._skyLevel` (skyStat="q25"): a sky level that faint stars bias little."""
+
+    def testGaussianNoiseIsUnbiased(self):
+        rng = np.random.default_rng(3)
+        v = 7.0 + rng.normal(0, 20, 200000)
+        self.assertAlmostEqual(pl._skyLevel(v, np.full(v.size, 20.0)), 7.0, delta=0.3)
+        self.assertAlmostEqual(pl._skyLevel(v), 7.0, delta=0.3)
+
+    def testFaintStarsBiasItLessThanTheMedian(self):
+        rng = np.random.default_rng(4)
+        n = 200000
+        v = rng.normal(0, 20, n) + rng.exponential(25.0, n) * (rng.uniform(size=n) < 0.3)
+        q = pl._skyLevel(v, np.full(n, 20.0))
+        m = pl._skyLevel(v)
+        self.assertLess(abs(q), 0.8 * abs(m))
+
+    def testMeshWithQ25(self):
+        n = 256
+        yy, xx = np.mgrid[:n, :n]
+        plane = 100 + 30 * xx / n
+        rng = np.random.default_rng(5)
+        img = plane + rng.normal(0, 10, (n, n))
+        surf, _, _ = pl._medianSkyMesh(img, np.ones((n, n), bool), smooth=1,
+                                       sig=np.full((n, n), 10.0))
+        self.assertLess(np.sqrt(np.mean((surf - plane) ** 2)), 1.5)
+
+
+class JointSkyMeshTestCase(unittest.TestCase):
+    """The bilinear sky basis of `fitLib.jointPsfFitDiag` (``skyMeshPx``)."""
+
+    def testTentsAreAPartitionOfUnityAndKeepAPlane(self):
+        ny, nx = 100, 73
+        t = L._skyTents(ny, nx, 30)
+        y, x = np.divmod(np.arange(ny * nx), nx)
+        r, c, v, nNodes = L._skyTentEntries(t, y, x)
+        self.assertEqual(nNodes, t[0] * t[1])
+        np.testing.assert_allclose(np.bincount(r, weights=v, minlength=ny * nx), 1.0, atol=1e-12)
+        ky, kx, hy, hx = t
+        nodeY, nodeX = np.divmod(np.arange(nNodes), kx)
+        coef = 5 + 2 * nodeX * hx - 3 * nodeY * hy           # a plane, sampled at the nodes
+        surf = np.bincount(r, weights=v * coef[c], minlength=ny * nx)
+        np.testing.assert_allclose(surf, 5 + 2 * x - 3 * y, atol=1e-9)
 
 
 if __name__ == "__main__":

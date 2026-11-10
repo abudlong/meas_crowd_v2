@@ -124,7 +124,8 @@ CROWDED_STELLAR_FIELD_CONFIG = dict(
 # (halo / ring fakes, position polish, pair split, galaxies), the shape cut or the noise / PSF-error
 # checks.  Bright-star correction terms are kept.  With no background refit between passes, the
 # background is a smooth surface through 32 px block medians of raw - model where the model is
-# < 0.5 sigma, updated before every inner iteration and at the end (skyMedian="mesh"): the visit
+# < 0.5 sigma (25th percentile + 0.674 sigma per block, twice with a flux refit in between),
+# updated before every inner iteration and at the end (skyMedian="mesh"): the visit
 # image's background is over-subtracted around dense star groups (by up to ~50 counts on LSSTCam
 # det 144), with structure on 50-150 px scales that a plane per tile cannot follow.  On LSSTCam detector 144, visit 2025062100433,
 # tile x1000_y1000: 12.8 s instead of 141 s; 91% of the full run's S/N > 20 sources recovered,
@@ -137,8 +138,12 @@ FAST_STELLAR_FIELD_CONFIG = dict(
     dropHaloMimics=False, dropRingMimics=False, splitTest=False, ellipTest=False,
     finalPolish=False, autoPoisson=False, modelErrMeasure=False,
     jointSolverTol=1e-6,
-    skyMedian="mesh",            # the background: a smooth surface through the median sky between
-                                 #   the stars (32 px cells), updated before every iteration
+    skyMedian="mesh",            # the background: a smooth surface through the sky between the
+                                 #   stars (32 px cells), updated before every iteration
+    skyStat="q25",               # cell level: 25th percentile + 0.674 sigma (faint unmodelled stars
+                                 #   bias a median high, most in the densest, most over-subtracted parts)
+    skyMeshSmooth=1,             # no median filter over cells: it flattened the dips
+    skyRounds=2,                 # sky, flux refit, sky: the fit first absorbs a dip into the fluxes
 )
 
 

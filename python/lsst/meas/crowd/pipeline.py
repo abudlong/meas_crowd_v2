@@ -170,6 +170,9 @@ PIPELINE_DEFAULTS = dict(
                                #   fields it takes up wing light and unresolved stars (on LSSTCam
                                #   det 144 it subtracted +3.3 counts where the sky is ~-4): prefer
                                #   skyMedian
+    skyJointMeshPx=0,         # fit a smooth sky (bilinear nodes this many px apart) in every joint
+                              #   fit, together with the fluxes (0 = none); the fitted sky is removed
+                              #   from the working image, as with skyTerms
     skyMedian=False,          # single-pass runs (fast preset): before every inner iteration and once
                                #   at the end (followed by a flux refit), set the background from
                                #   block medians of raw - model on the pixels where the model is <
@@ -180,6 +183,12 @@ PIPELINE_DEFAULTS = dict(
                                #   structure, e.g. the over-subtraction around dense star groups
     skyMeshPx=32,             # skyMedian="mesh": block size [px]
     skyMeshSmooth=3,          # skyMedian="mesh": median filter over this many cells (1 = none)
+    skyMeshMinPix=64,         # skyMedian="mesh": usable pixels a cell needs (else filled from neighbours)
+    skyQuietSigma=0.5,        # skyMedian: sky pixels are those where the model < this x sigma
+    skyStat="median",         # skyMedian: level of a block, "median" or "q25" (25th percentile +
+                              #   0.674 sigma: faint unmodelled stars bias it much less)
+    skyRounds=1,              # skyMedian: sky + flux refits per update (more rounds follow deep
+                              #   background dips that the fit first absorbs into the fluxes)
     skyInitial=False,         # skyMedian: also estimate the sky before the first fit (block medians
                                #   of the raw cutout); needed when the image still contains its sky,
                                #   e.g. with the visit's own background added back
@@ -809,7 +818,16 @@ def _jointFitWarm(exposure, psf, peakPositions, badBitmask, **kw):
     return fit
 
 
-def _medianSkyPlane(resid, ok, block=32, minPix=64, clip=3.0, nIter=3):
+def _skyLevel(vals, sig=None):
+    """Return the sky level of a set of pixels: their median, or with the pixels' noise ``sig``,
+    the 25th percentile + 0.674 sigma (exact for Gaussian noise; positive outliers such as faint
+    unmodelled stars move it much less than the median)."""
+    if sig is None:
+        return float(np.median(vals))
+    return float(np.percentile(vals, 25.0) + 0.6745 * np.median(sig))
+
+
+def _medianSkyPlane(resid, ok, block=32, minPix=64, clip=3.0, nIter=3, sig=None):
     """Fit a tilted plane to block medians of ``resid`` on the ``ok`` pixels.
 
     Medians make the sky robust to the positive tail of faint, unmodelled stars in crowded fields
@@ -851,7 +869,8 @@ def _medianSkyPlane(resid, ok, block=32, minPix=64, clip=3.0, nIter=3):
             if n < minPix:
                 continue
             yy, xx = np.nonzero(sub)
-            med.append(np.median(resid[y0:y0 + block, x0:x0 + block][sub]))
+            med.append(_skyLevel(resid[y0:y0 + block, x0:x0 + block][sub],
+                                 None if sig is None else sig[y0:y0 + block, x0:x0 + block][sub]))
             bx.append(x0 + xx.mean())
             by.append(y0 + yy.mean())
             cnt.append(n)
@@ -887,7 +906,7 @@ def _padLinear(grid, k=1):
     return ext
 
 
-def _medianSkyMesh(resid, ok, block=32, minPix=64, smooth=3):
+def _medianSkyMesh(resid, ok, block=32, minPix=64, smooth=3, sig=None):
     """A smooth background surface from cell medians of ``resid`` on the ``ok`` pixels.
 
     The image is split into equal cells of about ``block`` px that cover it exactly.  Each cell
@@ -930,7 +949,8 @@ def _medianSkyMesh(resid, ok, block=32, minPix=64, smooth=3):
         for j in range(gx):
             sub = ok[ey[i]:ey[i + 1], ex[j]:ex[j + 1]]
             if sub.sum() >= minPix:
-                grid[i, j] = np.median(resid[ey[i]:ey[i + 1], ex[j]:ex[j + 1]][sub])
+                cs = (slice(ey[i], ey[i + 1]), slice(ex[j], ex[j + 1]))
+                grid[i, j] = _skyLevel(resid[cs][sub], None if sig is None else sig[cs][sub])
     have = np.isfinite(grid)
     nCells = int(have.sum())
     if nCells == 0:
@@ -2744,6 +2764,8 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
         ``residualFull``, ``peaks``, ``amps``, histories, ``snaps``), plus ``S``,
         ``brightCorr``, ``adaptive`` (the loop decisions), ``isGaia`` and ``gaiaIndex``.
     """
+    if P["skyStat"] not in ("median", "q25"):
+        raise ValueError(f"skyStat must be 'median' or 'q25', not {P['skyStat']!r}")
     if P["skyMedian"] not in (None, False, True, "plane", "mesh"):
         raise ValueError(f"skyMedian must be False, 'plane' (True) or 'mesh', not {P['skyMedian']!r}")
     timer = timer or L.TIMER
@@ -2760,6 +2782,8 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
     fitkw = dict(supportFrac=P["supportFrac"], sysFrac=P["sysFrac"], poissonK=P["poissonK"])
     if P["skyTerms"]:
         fitkw["skyTerms"] = int(P["skyTerms"])
+    if P["skyJointMeshPx"]:
+        fitkw["skyMeshPx"] = float(P["skyJointMeshPx"])
     target = float(P["targetSnr"] if P["targetSnr"] is not None else P["minSnr"])
     tFloor, thrMin, step = P["tFloor"], P["thresholdMin"], P["thresholdStep"]
     thr = float(thresholdStart if thresholdStart is not None else P["thresholdStart"])
@@ -2812,18 +2836,21 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
 
     def updateSky(label):
         """Set the working image to raw - (median sky of raw - model between the stars)."""
-        quiet = skyOk & (modelFull < 0.5 * skySig)
+        quiet = skyOk & (modelFull < P["skyQuietSigma"] * skySig)
+        sigQ = skySig if P["skyStat"] == "q25" else None
         if P["skyMedian"] == "mesh":
             plane, grid, nb = _medianSkyMesh(skyRaw - modelFull, quiet, block=int(P["skyMeshPx"]),
-                                             smooth=int(P["skyMeshSmooth"]))
+                                             minPix=int(P["skyMeshMinPix"]),
+                                             smooth=int(P["skyMeshSmooth"]), sig=sigQ)
             coef = np.array([float(np.median(plane)), float(plane.min()), float(plane.max())])
             print(f"  sky ({label}, mesh {P['skyMeshPx']} px): median {coef[0]:+.3f}, range "
                   f"{coef[1]:+.2f} .. {coef[2]:+.2f}, from {nb}/{grid.size} cells of "
-                  f"{int(quiet.sum())} px with model < 0.5 sigma")
+                  f"{int(quiet.sum())} px with model < {P['skyQuietSigma']:g} sigma")
         else:
-            plane, coef, nb = _medianSkyPlane(skyRaw - modelFull, quiet)
+            plane, coef, nb = _medianSkyPlane(skyRaw - modelFull, quiet, sig=sigQ)
             print(f"  sky ({label}): {coef[0]:+.3f} (slopes {coef[1]:+.2f}, {coef[2]:+.2f} per "
-                  f"width) from {nb} blocks of {int(quiet.sum())} px with model < 0.5 sigma")
+                  f"width) from {nb} blocks of {int(quiet.sum())} px with model < "
+                  f"{P['skyQuietSigma']:g} sigma")
         data[:] = skyRaw - plane.astype(data.dtype)
         return coef
 
@@ -2879,7 +2906,11 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
 
         if skyRaw is not None and fit is not None:
             with T("sky (block medians)"):
-                skyCoef = updateSky("block medians")
+                for r_ in range(max(1, int(P["skyRounds"]))):
+                    if r_:                        # refit the fluxes on the new sky, then again
+                        fit = _fit(exposure, psf, S, badBitmask, fit["modelFull"], fitkw)
+                        modelFull = corrected(fit)
+                    skyCoef = updateSky("block medians" + (f", round {r_ + 1}" if r_ else ""))
 
         print(f"\n--- outer {outerIdx + 1} | inner {it + 1} (cap {P['maxInner']}) | "
               f"threshold={thr:.2f}σ | sources={len(S['xy'])} ---")
@@ -3098,9 +3129,10 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
 
     if skyRaw is not None and fit is not None:          # final sky for the final model, then fluxes
         with timer.step("sky (block medians)", outer=outerIdx):
-            skyCoef = updateSky("final")
-            fit = _fit(exposure, psf, S, badBitmask, fit["modelFull"], fitkw)
-            modelFull = corrected(fit)
+            for r_ in range(max(1, int(P["skyRounds"]))):
+                skyCoef = updateSky("final" + (f", round {r_ + 1}" if r_ else ""))
+                fit = _fit(exposure, psf, S, badBitmask, fit["modelFull"], fitkw)
+                modelFull = corrected(fit)
             diag = check(fit, modelFull)
             if snaps:
                 snaps[-1].update(fit=fit, residual=(data - modelFull).copy())

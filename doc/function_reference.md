@@ -3447,7 +3447,7 @@ Assign each source on the pages a colour from ``SRC_PALETTE``.
 
 ### fitLib.jointPsfFitDiag
 
-`jointPsfFitDiag(exposure, psf, peakPositions, badBitmask, ampZeroTol=1e-06, supportFrac=0.01, varModel=None, sysFrac=0.03, poissonK=0.0, skyTerms=0)`
+`jointPsfFitDiag(exposure, psf, peakPositions, badBitmask, ampZeroTol=1e-06, supportFrac=0.01, varModel=None, sysFrac=0.03, poissonK=0.0, skyTerms=0, skyMeshPx=0)`
 
 Fit all PSF amplitudes in one non-negative solve, keeping what is needed for diagnostics.
 
@@ -3465,6 +3465,7 @@ Weighted, non-negative, one sparse solve against the original exposure.  PSF sta
 | `sysFrac` | `float`, optional | Fractional model error added to the variance. |
 | `poissonK` | `float`, optional | Extra variance per unit model flux. |
 | `skyTerms` | `int`, optional | Fit a sky background together with the fluxes: 0 none, 1 a constant, 3 a tilted plane (a + b x + c y, x and y scaled to the image size and centred).  The sky terms may be negative.  The sky is part of ``modelFull`` and returned as ``sky`` (coefficients) and ``skyImage``. |
+| `skyMeshPx` | `float`, optional | Instead of ``skyTerms``: fit a smooth sky surface, bilinear between nodes about this many pixels apart (0 = none).  The node values may be negative. |
 
 | Returns | Type | Description |
 | --- | --- | --- |

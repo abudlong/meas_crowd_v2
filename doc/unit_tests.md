@@ -4,7 +4,7 @@ Every unit test in `tests/`: what it checks, what it feeds in, and what it must 
 pass.  How to run them and read the results is in the
 [pipeline guide](pipeline_guide.md#unit-tests-running-them-and-checking-the-results).
 
-The suite has **147 tests in 15 files**.  Without the Rubin stack 145 run and the 2 in
+The suite has **152 tests in 15 files**.  Without the Rubin stack 150 run and the 2 in
 `test_fastStampsStack.py` are skipped; `testCxxEqualsNumpy` is also skipped if the C++ extension
 was not built, and the `test_sparseSolver.py` solver tests if it was built without the
 sparse solver.  `test_docstrings.py` checks that this page lists every test and that the
@@ -103,6 +103,7 @@ The sped-up steps give the same answers as the code they replace.
 | `CxxLoopsTestCase.testDesignMatrixAndModel` | `jointPsfFitDiag` with the C++ matrix / group / model loops (`buildDesignMatrix`, `accumulateModel`) | the same scene with bad pixels, solved from the same start | identical matrix, groups, group map, masks, fluxes and model to the Python loops; group chi2 to 1e-12 |
 | `CxxLoopsTestCase.testCentroidStepSameAsPython` | `_refineSubset`'s per-source loop in C++ (`refineCentroids`) | the same scene, three sources marked extended | the same sources move, to the same positions (1e-9 px) as `_refineSubsetPython` |
 | `SkyTermsTestCase.testRecoversPlaneAndFluxes` | `jointPsfFitDiag(skyTerms=3)`: a sky plane fitted with the fluxes | 120 stars on a sky of -9 counts tilted (+4 across x, -2 across y), true positions and PSF | plane within 0.3 of (-9, 4, -2), sky image within 0.4, fluxes unbiased (median ratio within 1 %, 90 % within 6 %); the Eigen and scipy solvers agree |
+| `SkyTermsTestCase.testMeshSkyFollowsADip` | Joint fit with a smooth sky (`skyMeshPx=32`) | the plane + a -25 count dip, 120 stars | sky rms error < 2 counts, flux bias < 1.5% |
 | `SkyTermsTestCase.testFitSubtractsSky` | `pipeline._fit` with sky terms | the same scene | the image becomes data - fitted sky, the residual's median is < 1 count |
 | `MedianSkyTestCase.testRecoversPlaneDespitePositiveTail` | `_medianSkyPlane` (skyMedian) is robust to faint unmodelled stars | a tilted plane (-4, +3, -1.5) + noise + a positive exponential tail on 15 % of the pixels, a masked strip | the tilt within 0.8; the level's error below 0.7 x the plain mean's (which the tail pulls up by > 3); the masked strip's blocks skipped |
 | `MedianSkyTestCase.testTooFewBlocks` | No usable pixels | an all-masked image | no blocks, zero plane |
@@ -110,7 +111,11 @@ The sped-up steps give the same answers as the code they replace.
 | `MedianSkyMeshTestCase.testPlaneIsExactEdgesIncluded` | `_medianSkyMesh` leaves a plane exactly as it is | planes on 432 x 432, 432 x 373 and 100 x 64 images, smoothing 1 and 3 | equal to 1e-9 everywhere, edges and corners included |
 | `MedianSkyMeshTestCase.testFollowsADipThatAPlaneCannot` | The mesh follows background structure | a -50 count Gaussian dip (sigma 70 px) on -10, noise, a faint-star tail, a masked core | rms error < 4 counts and < 0.4 x the plane's; the masked core filled within 8 counts |
 | `MedianSkyMeshTestCase.testNoUsablePixels` | No usable pixels | an all-masked image | zero surface, no cells |
-| `MedianSkyMeshTestCase.testBadOption` | `skyMedian` is validated | "spline" | `ValueError` |
+| `MedianSkyMeshTestCase.testBadOption` | `skyMedian` and `skyStat` are validated | "spline", "mode" | `ValueError` |
+| `SkyLevelTestCase.testGaussianNoiseIsUnbiased` | `_skyLevel` on pure noise | 200 000 Gaussian pixels at 7 counts | median and q25 both within 0.3 |
+| `SkyLevelTestCase.testFaintStarsBiasItLessThanTheMedian` | q25 vs median with faint stars | noise + a 30% exponential tail | q25 bias < 0.8 x the median's |
+| `SkyLevelTestCase.testMeshWithQ25` | `_medianSkyMesh` with `sig` (q25) | a plane + noise | rms error < 1.5 counts |
+| `JointSkyMeshTestCase.testTentsAreAPartitionOfUnityAndKeepAPlane` | The bilinear sky basis (`skyMeshPx`) | 100 x 73 image, 30 px nodes | weights sum to 1; a plane is exact |
 
 ## test_psfRefit.py
 

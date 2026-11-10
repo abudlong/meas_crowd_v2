@@ -2665,9 +2665,30 @@ def _frameAxes(ax, color, lw=3.0):
 # Diagnostic joint fit
 # =====================================================================
 
+def _skyTents(ny, nx, spacing):
+    """Return the bilinear sky-node layout of an image: (ky, kx, hy, hx), nodes on both edges."""
+    ky = max(2, int(round((ny - 1) / spacing)) + 1)
+    kx = max(2, int(round((nx - 1) / spacing)) + 1)
+    return ky, kx, max(ny - 1, 1) / (ky - 1), max(nx - 1, 1) / (kx - 1)
+
+
+def _skyTentEntries(tents, y, x):
+    """Return (row, node, weight, nNodes) of the bilinear sky basis at pixels (``y``, ``x``)."""
+    ky, kx, hy, hx = tents
+    fy, fx = np.asarray(y, float) / hy, np.asarray(x, float) / hx
+    iy = np.clip(np.floor(fy).astype(np.int64), 0, ky - 2)
+    ix = np.clip(np.floor(fx).astype(np.int64), 0, kx - 2)
+    ty, tx = fy - iy, fx - ix
+    n = len(iy)
+    rows = np.tile(np.arange(n), 4)
+    cols = np.concatenate([iy * kx + ix, iy * kx + ix + 1, (iy + 1) * kx + ix, (iy + 1) * kx + ix + 1])
+    vals = np.concatenate([(1 - ty) * (1 - tx), (1 - ty) * tx, ty * (1 - tx), ty * tx])
+    return rows, cols, vals, ky * kx
+
+
 def jointPsfFitDiag(exposure, psf, peakPositions, badBitmask,
                        ampZeroTol=1e-6, supportFrac=0.01,
-                       varModel=None, sysFrac=0.03, poissonK=0.0, skyTerms=0):
+                       varModel=None, sysFrac=0.03, poissonK=0.0, skyTerms=0, skyMeshPx=0):
     """Fit all PSF amplitudes in one non-negative solve, keeping what is needed for diagnostics.
 
     Weighted, non-negative, one sparse solve against the original exposure.  PSF stamps are not
@@ -2698,6 +2719,9 @@ def jointPsfFitDiag(exposure, psf, peakPositions, badBitmask,
         (a + b x + c y, x and y scaled to the image size and centred).  The sky terms may be
         negative.  The sky is part of ``modelFull`` and returned as ``sky`` (coefficients) and
         ``skyImage``.
+    skyMeshPx : `float`, optional
+        Instead of ``skyTerms``: fit a smooth sky surface, bilinear between nodes about this many
+        pixels apart (0 = none).  The node values may be negative.
 
     Returns
     -------
@@ -2749,7 +2773,16 @@ def jointPsfFitDiag(exposure, psf, peakPositions, badBitmask,
     skyTerms = int(skyTerms or 0)
     if skyTerms not in (0, 1, 3):
         raise ValueError(f"skyTerms must be 0, 1 or 3, not {skyTerms}")
-    if skyTerms:                  # sky columns (constant, x, y) over the good pixels, after the sources
+    meshTents = None
+    if skyMeshPx and skyMeshPx > 0:      # bilinear sky nodes: 4 columns touch every pixel
+        from scipy.sparse import hstack as _hstack
+        meshTents = _skyTents(ny, nx, skyMeshPx)
+        gy, gx = np.divmod(flat, nx)
+        rows, cols, vals, nNodes = _skyTentEntries(meshTents, gy, gx)
+        S_ = csc_matrix((vals * sqrtW[rows], (rows, cols)), shape=(nPix, nNodes))
+        Afit = _hstack([Aw, S_], format="csc")
+        lb = np.concatenate([np.zeros(nSrc), np.full(nNodes, -np.inf)])
+    elif skyTerms:                # sky columns (constant, x, y) over the good pixels, after the sources
         from scipy.sparse import hstack as _hstack
         gy, gx = np.divmod(flat, nx)
         basis = [np.ones(nPix), (gx - nx / 2) / max(nx, 1), (gy - ny / 2) / max(ny, 1)][:skyTerms]
@@ -2785,7 +2818,12 @@ def jointPsfFitDiag(exposure, psf, peakPositions, badBitmask,
                 sub[c['sig']] = labels[k]
 
     skyImage = None
-    if skyTerms:
+    if meshTents is not None:
+        yyI, xxI = np.divmod(np.arange(ny * nx), nx)
+        r_, c_, v_, _ = _skyTentEntries(meshTents, yyI, xxI)
+        skyImage = np.bincount(r_, weights=v_ * sky[c_], minlength=ny * nx).reshape(ny, nx)
+        modelFull = modelFull + skyImage
+    elif skyTerms:
         yyI, xxI = np.mgrid[:ny, :nx]
         skyImage = np.full((ny, nx), sky[0])
         if skyTerms > 1:
