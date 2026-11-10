@@ -3337,11 +3337,28 @@ def refitPsfPiff(exposure, psf, res, P, point, verbose=True):
     centroid = L.afwTable.Point2DKey.addFields(schema, "centroid", "fitted position", "pixel")
     schema.getAliasMap().set("slot_Centroid", "centroid")
     cat = L.afwTable.SourceCatalog(schema)
-    for j in idx:
-        rec = cat.addNew()
-        rec.set(centroid, L.geom.Point2D(float(res["S"]["xy"][j, 0]), float(res["S"]["xy"][j, 1])))
-    cat = cat.copy(deep=True)                     # contiguous, as the tasks require
     stamp = int(P["piffStampSize"])
+    ebox = exposure.getBBox()
+    amps = np.asarray(fit["amps"], float)
+    for j in idx:
+        x, y = float(res["S"]["xy"][j, 0]), float(res["S"]["xy"][j, 1])
+        # every candidate needs a footprint with a peak: the stack's PSF-candidate code reads it
+        # without checking (a catalogue of bare positions crashes the kernel)
+        center = L.geom.Point2I(int(round(x)), int(round(y)))
+        if not ebox.contains(center):
+            continue
+        spans = L.afwGeom.SpanSet.fromShape(stamp // 2, L.afwGeom.Stencil.CIRCLE,
+                                            offset=center).clippedTo(ebox)
+        if spans.getArea() == 0:
+            continue
+        fp = L.afwDetect.Footprint(spans, ebox)
+        fp.addPeak(x, y, float(amps[j] * psfPeak) if j < len(amps) else 0.0)
+        rec = cat.addNew()
+        rec.setFootprint(fp)
+        rec.set(centroid, L.geom.Point2D(x, y))
+    if not len(cat):
+        raise RuntimeError("no PSF star inside the cutout")
+    cat = cat.copy(deep=True)                     # contiguous, as the tasks require
     mkCfg = L.MakePsfCandidatesTask.ConfigClass()
     mkCfg.kernelSize = stamp
     cands = L.MakePsfCandidatesTask(config=mkCfg).run(cat, exposure=clean).psfCandidates

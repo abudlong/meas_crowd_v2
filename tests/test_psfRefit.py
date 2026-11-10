@@ -76,8 +76,9 @@ class _Cat(list):
         super().__init__()
 
     def addNew(self):
-        rec = types.SimpleNamespace(pos=None)
+        rec = types.SimpleNamespace(pos=None, footprint=None)
         rec.set = lambda key, value, r=rec: setattr(r, "pos", (value[0], value[1]))
+        rec.setFootprint = lambda fp, r=rec: setattr(r, "footprint", fp)
         self.append(rec)
         return rec
 
@@ -85,6 +86,33 @@ class _Cat(list):
         out = _Cat()
         out.extend(self)
         return out
+
+
+class _Spans:
+    """Stand-in for `lsst.afw.geom.SpanSet`: a disc of the given radius."""
+
+    def __init__(self, radius, center):
+        self.radius, self.center = radius, center
+
+    @classmethod
+    def fromShape(cls, radius, stencil, offset):
+        return cls(radius, offset)
+
+    def clippedTo(self, box):
+        return self
+
+    def getArea(self):
+        return int(np.pi * self.radius ** 2) + 1
+
+
+class _Footprint:
+    """Stand-in for `lsst.afw.detection.Footprint` (spans and peaks)."""
+
+    def __init__(self, spans, box):
+        self.spans, self.peaks = spans, []
+
+    def addPeak(self, x, y, value):
+        self.peaks.append((x, y, value))
 
 
 class RefitPsfPiffWiringTestCase(unittest.TestCase):
@@ -114,6 +142,7 @@ class RefitPsfPiffWiringTestCase(unittest.TestCase):
 
             def run(self, cat, exposure):
                 seen["candidatePositions"] = [r.pos for r in cat]
+                seen["footprints"] = [r.footprint for r in cat]
                 seen["candidateImage"] = exposure.image.array.copy()
                 return types.SimpleNamespace(psfCandidates=list(range(len(cat))))
 
@@ -143,6 +172,10 @@ class RefitPsfPiffWiringTestCase(unittest.TestCase):
         with mock.patch.dict(sys.modules, mods), \
                 mock.patch.object(pl, "selectPsfStars", lambda *a, **k: idx), \
                 mock.patch.object(L, "afwTable", afwTable, create=True), \
+                mock.patch.object(L, "afwGeom", types.SimpleNamespace(
+                    SpanSet=_Spans, Stencil=types.SimpleNamespace(CIRCLE="circle")), create=True), \
+                mock.patch.object(L, "afwDetect", types.SimpleNamespace(Footprint=_Footprint),
+                                  create=True), \
                 mock.patch.object(L, "MakePsfCandidatesTask", FakeMakeCandidates, create=True), \
                 mock.patch.object(L, "_filterValidPsfCandidates", lambda c, verbose=True: c,
                                   create=True), \
@@ -153,6 +186,12 @@ class RefitPsfPiffWiringTestCase(unittest.TestCase):
             self.assertEqual((seen["config"].spatialOrder, seen["config"].stampSize), (1, 25))
             self.assertEqual(seen["nCands"], len(idx))
             np.testing.assert_allclose(seen["candidatePositions"], xy[idx])
+            # the stack needs a footprint with a peak on every star
+            for fp, (x, y) in zip(seen["footprints"], xy[idx]):
+                self.assertIsNotNone(fp)
+                self.assertEqual(fp.spans.radius, 12)
+                np.testing.assert_allclose(fp.peaks[0][:2], (x, y))
+                self.assertEqual(fp.spans.center, (int(round(x)), int(round(y))))
             np.testing.assert_allclose(seen["candidateImage"], pl.psfStarImage(exp, fit, idx),
                                        atol=1e-3)
             with mock.patch.object(pl, "selectPsfStars", lambda *a, **k: idx[:3]):
