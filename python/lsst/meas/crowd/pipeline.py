@@ -3349,8 +3349,10 @@ def refitPsfPiff(exposure, psf, res, P, point, verbose=True):
         # every candidate needs a footprint with a peak: the stack's PSF-candidate code reads it
         # without checking (a catalogue of bare positions crashes the kernel)
         center = L.geom.Point2I(int(round(x)), int(round(y)))
-        if not ebox.contains(center):
-            continue
+        h = stamp // 2 + 1                       # the whole stamp must fit (the stack's candidate
+        if (center.getX() - h < ebox.getMinX() or center.getX() + h > ebox.getMaxX()   # code fails
+                or center.getY() - h < ebox.getMinY() or center.getY() + h > ebox.getMaxY()):
+            continue                             #   on the rest, then on its own warning)
         spans = L.afwGeom.SpanSet.fromShape(stamp // 2, L.afwGeom.Stencil.CIRCLE,
                                             offset=center).clippedTo(ebox)
         if spans.getArea() == 0:

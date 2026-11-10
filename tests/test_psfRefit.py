@@ -197,6 +197,11 @@ class RefitPsfPiffWiringTestCase(unittest.TestCase):
                 self.assertEqual((int(c[0]), int(c[1])), (int(round(x)), int(round(y))))
             np.testing.assert_allclose(seen["candidateImage"], pl.psfStarImage(exp, fit, idx),
                                        atol=1e-3)
+            xyEdge = xy.copy()                           # a star whose 27 px stamp does not fit
+            xyEdge[0] = (5.0, 60.0)
+            seen.clear()
+            pl.refitPsfPiff(exp, psf, dict(res, S=dict(xy=xyEdge)), P, (60.0, 60.0), verbose=False)
+            np.testing.assert_allclose(seen["candidatePositions"], xyEdge[idx[1:]])
             seen.clear()                                 # the stamps follow the model size
             pl.refitPsfPiff(exp, psf, res, dict(P, piffStampSize=21), (60.0, 60.0), verbose=False)
             self.assertEqual((seen["config"].stampSize, seen["config"].modelSize), (23, 21))
