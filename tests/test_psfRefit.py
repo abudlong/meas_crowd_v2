@@ -147,7 +147,8 @@ class RefitPsfPiffWiringTestCase(unittest.TestCase):
                 return types.SimpleNamespace(psfCandidates=list(range(len(cat))))
 
         class FakePiff:
-            ConfigClass = staticmethod(lambda: types.SimpleNamespace(spatialOrder=2, stampSize=0))
+            ConfigClass = staticmethod(lambda: types.SimpleNamespace(spatialOrder=2, stampSize=0,
+                                                                     modelSize=25))
 
             def __init__(self, config):
                 seen["config"] = config
@@ -184,6 +185,7 @@ class RefitPsfPiffWiringTestCase(unittest.TestCase):
             self.assertIs(out, psf)
             self.assertEqual(seen["candidateStamp"], 25)
             self.assertEqual((seen["config"].spatialOrder, seen["config"].stampSize), (1, 25))
+            self.assertEqual(seen["config"].modelSize, 25)
             self.assertEqual(seen["nCands"], len(idx))
             np.testing.assert_allclose(seen["candidatePositions"], xy[idx])
             # the stack needs a footprint with a peak on every star
@@ -195,9 +197,40 @@ class RefitPsfPiffWiringTestCase(unittest.TestCase):
                 self.assertEqual((int(c[0]), int(c[1])), (int(round(x)), int(round(y))))
             np.testing.assert_allclose(seen["candidateImage"], pl.psfStarImage(exp, fit, idx),
                                        atol=1e-3)
+            seen.clear()                                 # a smaller stamp shrinks PIFF's model too
+            pl.refitPsfPiff(exp, psf, res, dict(P, piffStampSize=21), (60.0, 60.0), verbose=False)
+            self.assertEqual((seen["config"].stampSize, seen["config"].modelSize), (21, 21))
             with mock.patch.object(pl, "selectPsfStars", lambda *a, **k: idx[:3]):
                 with self.assertRaises(RuntimeError):                  # too few stars
                     pl.refitPsfPiff(exp, psf, res, P, (60.0, 60.0), verbose=False)
+
+
+class PiffFailureReportTestCase(unittest.TestCase):
+    """`pipeline._piffFailureReport`: what PIFF saw under its stars when it gives up."""
+
+    def test(self):
+        import contextlib
+        import io
+        data, fit, xy, flux, comps = _scene()
+        exp = lsstStubs.FakeExposure(data.copy(), np.full(data.shape, 25.0))
+        exp.mask.array[:, :60] |= exp.mask.getPlaneBitMask("BAD")      # the left half
+        cfg = types.SimpleNamespace(badMaskPlanes=["BAD", "SAT"], modelSize=25)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            pl._piffFailureReport(exp, xy[:10], 25, cfg)
+        out = buf.getvalue()
+        self.assertIn("PIFF failure report: 10 stars", out)
+        self.assertIn("BAD", out)
+        self.assertIn("PIFF ignores pixels with: ['BAD', 'SAT']", out)
+        self.assertIn("PIFF modelSize = 25", out)
+
+    def testNeverRaises(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            pl._piffFailureReport(None, np.zeros((1, 2)), 25, None)
+        self.assertIn("report failed", buf.getvalue())
 
 
 class RefitPsfOptionTestCase(unittest.TestCase):

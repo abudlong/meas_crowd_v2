@@ -190,7 +190,8 @@ PIPELINE_DEFAULTS = dict(
     piffStampSize=25,         # refitPsf="piff": PIFF model stamp [px] (the visit PSF's is 25); the
                                #   wings beyond it come from wingsFromStars / psfWingSize as for the
                                #   other refits
-    piffSpatialOrder=1,       # refitPsf="piff": polynomial order of PIFF's variation over a cutout
+    piffSpatialOrder=0,       # refitPsf="piff": polynomial order of PIFF's variation over a cutout
+                              #   (0 = constant: as good on LSSTCam det 144 and half the time)
     piffMinStars=10,          # refitPsf="piff": fewer clean stars -> the pass's PSF is kept
     bgMode="plane",           # background refit between passes: "plane" (tilted plane, sigma-clipped),
                                #   "constant", "spline" (SubtractBackgroundTask surface on bgBinSize
@@ -3370,13 +3371,58 @@ def refitPsfPiff(exposure, psf, res, P, point, verbose=True):
     for name in ("stampSize", "kernelSize"):     # the field's name depends on the stack version
         if hasattr(cfg, name):
             setattr(cfg, name, stamp)
-    out = PiffPsfDeterminerTask(config=cfg).determinePsf(clean, cands, PropertyList())
+    if hasattr(cfg, "modelSize") and cfg.modelSize > stamp:    # PIFF needs modelSize <= stampSize
+        cfg.modelSize = stamp
+    try:
+        out = PiffPsfDeterminerTask(config=cfg).determinePsf(clean, cands, PropertyList())
+    except Exception:
+        if verbose:
+            _piffFailureReport(clean, res["S"]["xy"][idx], stamp, cfg)
+        raise
     psfNew = out[0] if isinstance(out, tuple) else out
     if verbose:
         print(f"  PIFF PSF refit: {len(cands)} neighbour-subtracted stars (of {len(idx)} selected), "
               f"spatial order {cfg.spatialOrder}, stamp {stamp} px; FWHM {fwhm:.3f} -> "
               f"{L._fwhm(psfNew, point):.3f} px")
     return psfNew
+
+
+def _piffFailureReport(exposure, xy, stamp, cfg):
+    """Print what PIFF saw under its stars: mask planes, variance and flux in their stamps."""
+    try:
+        box = exposure.getBBox()
+        X0, Y0 = box.getMinX(), box.getMinY()
+        ny, nx = exposure.image.array.shape
+        h = stamp // 2
+        sel = np.zeros((ny, nx), bool)
+        sums, negs = [], 0
+        for x, y in np.asarray(xy, float):
+            ix, iy = int(round(x)) - X0, int(round(y)) - Y0
+            ys, xs = slice(max(iy - h, 0), min(iy + h + 1, ny)), slice(max(ix - h, 0), min(ix + h + 1, nx))
+            sel[ys, xs] = True
+            sums.append(float(exposure.image.array[ys, xs].sum()))
+        sums = np.asarray(sums)
+        negs = int((sums <= 0).sum())
+        m = exposure.mask
+        planes = []
+        for name, bit in sorted(m.getMaskPlaneDict().items(), key=lambda kv: kv[1]):
+            frac = float(((m.array[sel] & (1 << bit)) != 0).mean())
+            if frac > 0:
+                planes.append(f"{name} {100 * frac:.1f}%")
+        var = exposure.variance.array[sel]
+        print(f"  PIFF failure report: {len(sums)} stars, stamp {stamp} px; stamp flux sum median "
+              f"{np.median(sums):.4g}, {negs} with sum <= 0; variance in stamps min {var.min():.4g}, "
+              f"median {np.median(var):.4g}, {int((~(var > 0)).sum())} px not > 0")
+        print("    mask planes set in the stars' stamps: " + (", ".join(planes) or "none"))
+        bad = getattr(cfg, "badMaskPlanes", None)
+        if bad is not None:
+            print(f"    PIFF ignores pixels with: {list(bad)}")
+        for name in ("minimumUnmaskedFraction", "maxSNR", "useCoordinates", "modelSize",
+                     "samplingSize", "outlierNSigma", "outlierMaxRemove"):
+            if hasattr(cfg, name):
+                print(f"    PIFF {name} = {getattr(cfg, name)}")
+    except Exception as e:                   # the report must never hide PIFF's own error
+        print(f"  (PIFF failure report failed: {type(e).__name__}: {e})")
 
 
 def selectPsfStars(exposure, res, fwhm, psfPeak, noise, P, verbose=True):

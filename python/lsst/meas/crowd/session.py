@@ -137,6 +137,8 @@ FAST_STELLAR_FIELD_CONFIG = dict(
     maxOuter=2, minOuter=2, maxInner=4, thresholdStep=-2.0,
     growFrac=1.0, growMin=10 ** 6, patience=1,
     useShapeCut=False, refitPsf="piff", wingsFromStars=False,
+    psfStackN=40,                # PIFF from 40 clean stars, constant over the cutout (piffSpatialOrder
+                                 #   0): the same residuals as 80 stars varying linearly, half the time
     dropHaloMimics=False, dropRingMimics=False, splitTest=False, ellipTest=False,
     finalPolish=False, autoPoisson=False, modelErrMeasure=False,
     jointSolverTol=1e-6,

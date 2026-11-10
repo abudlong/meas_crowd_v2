@@ -4,7 +4,7 @@ Every unit test in `tests/`: what it checks, what it feeds in, and what it must 
 pass.  How to run them and read the results is in the
 [pipeline guide](pipeline_guide.md#unit-tests-running-them-and-checking-the-results).
 
-The suite has **155 tests in 15 files**.  Without the Rubin stack 153 run and the 2 in
+The suite has **157 tests in 15 files**.  Without the Rubin stack 155 run and the 2 in
 `test_fastStampsStack.py` are skipped; `testCxxEqualsNumpy` is also skipped if the C++ extension
 was not built, and the `test_sparseSolver.py` solver tests if it was built without the
 sparse solver.  `test_docstrings.py` checks that this page lists every test and that the
@@ -126,6 +126,8 @@ what it is given.
 | --- | --- | --- | --- |
 | `PsfStarImageTestCase.testOnlyThePsfStarsRemain` | `psfStarImage`: every source's model subtracted except the PSF stars' | 40 Gaussian stars, 3 chosen as PSF stars | equal to data - model + the 3 stars' models; the input image unchanged |
 | `RefitPsfPiffWiringTestCase.test` | `refitPsfPiff` hands the stack's tasks the right inputs | the same scene, 14 PSF stars; PIFF, the candidate maker and the catalogue replaced by recording stand-ins | candidates at the fitted positions on the neighbour-subtracted image, 25 px stamps, spatial order 1, every candidate passed to PIFF; too few stars raises `RuntimeError` |
+| `PiffFailureReportTestCase.test` | What PIFF saw when it fails | 10 stars, half the image masked BAD | star count, the BAD plane, PIFF's ignored planes and model size printed |
+| `PiffFailureReportTestCase.testNeverRaises` | The report never hides PIFF's error | no exposure | a one-line note instead of an exception |
 | `RefitPsfOptionTestCase.testValues` | PIFF is the only PSF refit | `refitPsf` default, True, False, "stack", "pca" | "piff", "piff", off, `ValueError`, `ValueError` |
 | `RefitPsfOptionTestCase.testPresets` | Every preset refits the PSF with PIFF | the crowded, crowded-stellar and fast presets | `refitPsf` "piff" |
 | `RefitPsfOptionTestCase.testRemovedRefits` | The residual-stack refits are gone | `pipeline` | no `refinePsfClean`, `refinePsfSpatial` |

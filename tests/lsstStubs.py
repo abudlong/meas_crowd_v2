@@ -181,6 +181,10 @@ class FakeMask:
     def getPlaneBitMask(self, name):
         return self.planes[name]
 
+    def getMaskPlaneDict(self):
+        """Plane name -> bit index, as afw's Mask.getMaskPlaneDict."""
+        return {k: int(v).bit_length() - 1 for k, v in self.planes.items()}
+
     def addMaskPlane(self, name):
         self.planes.setdefault(name, 1 << len(self.planes))
 

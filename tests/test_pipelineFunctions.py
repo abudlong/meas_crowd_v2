@@ -594,6 +594,7 @@ class StellarConfigTestCase(unittest.TestCase):
             session.makeConfig(session.FAST_STELLAR_FIELD_CONFIG))   # every fast option is valid
         self.assertEqual((P["maxOuter"], P["minOuter"]), (2, 2))   # pass, PIFF refit, pass
         self.assertEqual(P["refitPsf"], "piff")
+        self.assertEqual((P["piffSpatialOrder"], P["psfStackN"]), (0, 40))   # constant, 40 stars
 
 
 if __name__ == "__main__":
