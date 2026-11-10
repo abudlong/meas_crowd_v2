@@ -58,6 +58,7 @@ PIPELINE_DEFAULTS = dict(
     growMin=3,                # ... or >= growMin sources -> hold the threshold
     patience=2,                # stop after this many iterations without progress
     detectGain=1.0,           # detection runs on data - gain*model (1 = full joint model)
+    detectLocalBgPx=16,       # detection: temporary local background bin [px] (0 = none)
     targetSnr=None,           # residual must be clean down to this S/N (None: minSnr)
     tFloor=3.0,               # never detect below this S/N
     fdr=0.25,                  # tolerated N_neg/N_pos when going deeper
@@ -2086,14 +2087,19 @@ def printBrightCorrections(info, maxRows=15):
               f"{d['dy']:+6.2f} {d['dfluxPct']:+7.2f} {d['chi2Before']:11.2f} {d['chi2After']:7.2f}")
 
 
-def _detect(workingResidual, threshold, minPixels):
-    """Detect positive footprints on the working residual (None if detection fails)."""
+def _detect(workingResidual, threshold, minPixels, localBgPx=16):
+    """Detect positive footprints on the working residual (None if detection fails).
+
+    ``localBgPx``: bin size of the temporary local background removed before thresholding
+    (0 = none).  In dense fields a small bin takes the light of faint groups with it.
+    """
     cfg = L.SourceDetectionTask.ConfigClass()
     cfg.thresholdValue = threshold
     cfg.thresholdType = "pixel_stdev"
     cfg.minPixels = minPixels
-    cfg.doTempLocalBackground = True
-    cfg.tempLocalBackground.binSize = 16
+    cfg.doTempLocalBackground = bool(localBgPx)
+    if localBgPx:
+        cfg.tempLocalBackground.binSize = int(localBgPx)
     cfg.reEstimateBackground = False
     schema = L.afwTable.SourceTable.makeMinimalSchema()
     task = L.SourceDetectionTask(schema=schema, config=cfg)
@@ -2884,7 +2890,7 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
             wr.variance.array[:] = fit["variance"]
         wr.setPsf(psf)
         with T("detect on residual") as rec:
-            fps = _detect(wr, thr, P["minPixels"])
+            fps = _detect(wr, thr, P["minPixels"], P["detectLocalBgPx"])
         times["detect"] = rec["seconds"]
         if fps is None:
             stop = "detection failed (background estimation)"
