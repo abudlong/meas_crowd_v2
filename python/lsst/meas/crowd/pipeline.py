@@ -187,9 +187,9 @@ PIPELINE_DEFAULTS = dict(
     skyInitial=False,         # skyMedian: also estimate the sky before the first fit (block medians
                                #   of the raw cutout); needed when the image still contains its sky,
                                #   e.g. with the visit's own background added back
-    piffStampSize=25,         # refitPsf="piff": PIFF model stamp [px] (the visit PSF's is 25); the
-                               #   wings beyond it come from wingsFromStars / psfWingSize as for the
-                               #   other refits
+    piffStampSize=25,         # refitPsf="piff": PIFF model size [px] (the visit PSF's is 25; star
+                              #   stamps are 2 px larger); the wings beyond it come from
+                              #   wingsFromStars / psfWingSize as for the other refits
     piffSpatialOrder=0,       # refitPsf="piff": polynomial order of PIFF's variation over a cutout
                               #   (0 = constant: as good on LSSTCam det 144 and half the time)
     piffMinStars=10,          # refitPsf="piff": fewer clean stars -> the pass's PSF is kept
@@ -3338,7 +3338,10 @@ def refitPsfPiff(exposure, psf, res, P, point, verbose=True):
     centroid = L.afwTable.Point2DKey.addFields(schema, "centroid", "fitted position", "pixel")
     schema.getAliasMap().set("slot_Centroid", "centroid")
     cat = L.afwTable.SourceCatalog(schema)
-    stamp = int(P["piffStampSize"])
+    model = int(P["piffStampSize"])               # PIFF's model size
+    stamp = model + 2                             # star stamps a little larger: PIFF rejects a star
+    #   whose stamp is not larger than the model by its own floating-point check (25 px stamps
+    #   failed as "smaller than 25.000000000000004 px" on one side of a detector)
     ebox = exposure.getBBox()
     amps = np.asarray(fit["amps"], float)
     for j in idx:
@@ -3371,8 +3374,8 @@ def refitPsfPiff(exposure, psf, res, P, point, verbose=True):
     for name in ("stampSize", "kernelSize"):     # the field's name depends on the stack version
         if hasattr(cfg, name):
             setattr(cfg, name, stamp)
-    if hasattr(cfg, "modelSize") and cfg.modelSize > stamp:    # PIFF needs modelSize <= stampSize
-        cfg.modelSize = stamp
+    if hasattr(cfg, "modelSize"):
+        cfg.modelSize = model
     try:
         out = PiffPsfDeterminerTask(config=cfg).determinePsf(clean, cands, PropertyList())
     except Exception:
@@ -3383,7 +3386,7 @@ def refitPsfPiff(exposure, psf, res, P, point, verbose=True):
     psfNew = out[0] if isinstance(out, tuple) else out
     if verbose:
         print(f"  PIFF PSF refit: {len(cands)} neighbour-subtracted stars (of {len(idx)} selected), "
-              f"spatial order {cfg.spatialOrder}, stamp {stamp} px; FWHM {fwhm:.3f} -> "
+              f"spatial order {cfg.spatialOrder}, model {model} px, stamps {stamp} px; FWHM {fwhm:.3f} -> "
               f"{L._fwhm(psfNew, point):.3f} px")
     return psfNew
 

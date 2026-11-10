@@ -183,23 +183,23 @@ class RefitPsfPiffWiringTestCase(unittest.TestCase):
                 mock.patch.object(L, "_fwhm", lambda p, pt: 4.24, create=True):
             out = pl.refitPsfPiff(exp, psf, res, P, (60.0, 60.0), verbose=False)
             self.assertIs(out, psf)
-            self.assertEqual(seen["candidateStamp"], 25)
-            self.assertEqual((seen["config"].spatialOrder, seen["config"].stampSize), (1, 25))
+            self.assertEqual(seen["candidateStamp"], 27)                # model 25 + 2
+            self.assertEqual((seen["config"].spatialOrder, seen["config"].stampSize), (1, 27))
             self.assertEqual(seen["config"].modelSize, 25)
             self.assertEqual(seen["nCands"], len(idx))
             np.testing.assert_allclose(seen["candidatePositions"], xy[idx])
             # the stack needs a footprint with a peak on every star
             for fp, (x, y) in zip(seen["footprints"], xy[idx]):
                 self.assertIsNotNone(fp)
-                self.assertEqual(fp.spans.radius, 12)
+                self.assertEqual(fp.spans.radius, 13)
                 np.testing.assert_allclose(fp.peaks[0][:2], (x, y))
                 c = fp.spans.center                  # a stub or an lsst.geom Point2I
                 self.assertEqual((int(c[0]), int(c[1])), (int(round(x)), int(round(y))))
             np.testing.assert_allclose(seen["candidateImage"], pl.psfStarImage(exp, fit, idx),
                                        atol=1e-3)
-            seen.clear()                                 # a smaller stamp shrinks PIFF's model too
+            seen.clear()                                 # the stamps follow the model size
             pl.refitPsfPiff(exp, psf, res, dict(P, piffStampSize=21), (60.0, 60.0), verbose=False)
-            self.assertEqual((seen["config"].stampSize, seen["config"].modelSize), (21, 21))
+            self.assertEqual((seen["config"].stampSize, seen["config"].modelSize), (23, 21))
             with mock.patch.object(pl, "selectPsfStars", lambda *a, **k: idx[:3]):
                 with self.assertRaises(RuntimeError):                  # too few stars
                     pl.refitPsfPiff(exp, psf, res, P, (60.0, 60.0), verbose=False)

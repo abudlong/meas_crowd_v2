@@ -125,7 +125,7 @@ what it is given.
 | Test | What it checks | Input | Passes when |
 | --- | --- | --- | --- |
 | `PsfStarImageTestCase.testOnlyThePsfStarsRemain` | `psfStarImage`: every source's model subtracted except the PSF stars' | 40 Gaussian stars, 3 chosen as PSF stars | equal to data - model + the 3 stars' models; the input image unchanged |
-| `RefitPsfPiffWiringTestCase.test` | `refitPsfPiff` hands the stack's tasks the right inputs | the same scene, 14 PSF stars; PIFF, the candidate maker and the catalogue replaced by recording stand-ins | candidates at the fitted positions on the neighbour-subtracted image, 25 px stamps, spatial order 1, every candidate passed to PIFF; too few stars raises `RuntimeError` |
+| `RefitPsfPiffWiringTestCase.test` | `refitPsfPiff` hands the stack's tasks the right inputs | the same scene, 14 PSF stars; PIFF, the candidate maker and the catalogue replaced by recording stand-ins | candidates at the fitted positions on the neighbour-subtracted image, a 25 px model on 27 px stamps (21 on 23 for a smaller model), spatial order 1, every candidate passed to PIFF; too few stars raises `RuntimeError` |
 | `PiffFailureReportTestCase.test` | What PIFF saw when it fails | 10 stars, half the image masked BAD | star count, the BAD plane, PIFF's ignored planes and model size printed |
 | `PiffFailureReportTestCase.testPiffWhyCollectsLogging` | `_piffWhy` shows PIFF's own reasons | a stand-in task that logs and fails | distinct log lines printed, PIFF logging level raised to the highest the config accepts |
 | `PiffFailureReportTestCase.testNeverRaises` | The report never hides PIFF's error | no exposure | a one-line note instead of an exception |

@@ -328,7 +328,9 @@ the residual-stack refit used before (bottom-right scatter 1.12 vs 1.30), which 
    each clean star stands alone.
 3. **PIFF** (`lsst.meas.extensions.piff`): each star becomes a PSF candidate at its fitted
    position, with a circular footprint and peak (the stack's candidate code needs them), and
-   `PiffPsfDeterminerTask` fits the model (stamp `piffStampSize` = 25 px, constant over the
+   `PiffPsfDeterminerTask` fits the model (model `piffStampSize` = 25 px on 27 px star stamps:
+   with stamps exactly as large as the model, PIFF's own size check rejected every star on one
+   side of det 144 by a rounding error; constant over the
    cutout: `piffSpatialOrder` = 0; the fast preset uses 40 stars).  On det 144 this gave the same
    residuals as 80 stars and a linear variation, in half the time.  If PIFF fails, the stars'
    mask planes, weights and fluxes are printed (`_piffFailureReport`).
