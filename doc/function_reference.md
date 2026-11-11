@@ -303,7 +303,7 @@ Label the saturated cores, each grown by max(3 px, FWHM/2).
 
 ### pipeline.brightStarCorrections
 
-`brightStarCorrections(exposure, S, fit, model, psfPeak, noise, fwhm, badBitmask, sigmaMin=100.0, radiusFwhm=4.0, sweeps=2, radial=True, zones=None, haloModes=0, brightModes=0, coreRings=(), coreSigma=0.6, coreModes=0)`
+`brightStarCorrections(exposure, S, fit, model, psfPeak, noise, fwhm, badBitmask, sigmaMin=100.0, radiusFwhm=4.0, sweeps=2, radial=True, zones=None, haloModes=0, brightModes=0, coreRings=(), coreSigma=0.6, coreModes=0, cache=None)`
 
 Fit local correction terms for every bright or saturated star.
 
@@ -329,6 +329,7 @@ On top of the joint model, within ``radiusFwhm`` FWHM, each bright star's residu
 | `coreRings` | `tuple` [`float`], optional | Radii [px] of the narrow core terms (unsaturated stars). |
 | `coreSigma` | `float`, optional | Width [px] of the narrow core terms. |
 | `coreModes` | `int`, optional | Angular modes of the narrow core terms. |
+| `cache` | `dict`, optional | Per-star fit bases kept between calls within a pass (same PSF, weights and zones): a star's basis is reused while its position, stamp and good pixels are unchanged.  The correction image does not depend on the flux the basis was built with; the reported flux, shift and percentage are rescaled to the current flux. |
 
 | Returns | Type | Description |
 | --- | --- | --- |

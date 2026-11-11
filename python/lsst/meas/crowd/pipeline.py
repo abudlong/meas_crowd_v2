@@ -87,6 +87,11 @@ PIPELINE_DEFAULTS = dict(
     satGrowPx=2,             # also exclude pixels within this many px of SAT (non-linear,
                                # charge spill); 0 = off
     brightCorr=True,          # per-bright-star shift + width + flux correction terms
+    lightFirstPass=False,     # passes followed by a PSF refit run without bright-star corrections
+                              #   and with one sky round per update (they only find the sources
+                              #   and the PSF stars; the last pass redoes everything)
+    brightCorrCache=True,     # keep each bright star's correction basis while it does not move
+                              #   (same results, ~2-3x fewer basis builds per pass)
     brightCorrSigma=100.0,   # ... for stars with amp*psfPeak/noise above this (or SAT)
     brightCorrRadiusFwhm=4.0,
     brightCorrRadial=True,   # ... plus radial-profile terms (core/wing shape mismatch)
@@ -1886,7 +1891,7 @@ def _zoneFlags(xy, zoneMask, X0, Y0):
 def brightStarCorrections(exposure, S, fit, model, psfPeak, noise, fwhm, badBitmask,
                           sigmaMin=100.0, radiusFwhm=4.0, sweeps=2, radial=True,
                           zones=None, haloModes=0, brightModes=0, coreRings=(),
-                          coreSigma=0.6, coreModes=0):
+                          coreSigma=0.6, coreModes=0, cache=None):
     """Fit local correction terms for every bright or saturated star.
 
     On top of the joint model, within ``radiusFwhm`` FWHM, each bright star's residual is fitted
@@ -1934,6 +1939,11 @@ def brightStarCorrections(exposure, S, fit, model, psfPeak, noise, fwhm, badBitm
         Width [px] of the narrow core terms.
     coreModes : `int`, optional
         Angular modes of the narrow core terms.
+    cache : `dict`, optional
+        Per-star fit bases kept between calls within a pass (same PSF, weights and zones): a
+        star's basis is reused while its position, stamp and good pixels are unchanged.  The correction image
+        does not depend on the flux the basis was built with; the reported flux, shift and
+        percentage are rescaled to the current flux.
 
     Returns
     -------
@@ -1970,9 +1980,21 @@ def brightStarCorrections(exposure, S, fit, model, psfPeak, noise, fwhm, badBitm
                 continue
             ys, xs = c["ys"], c["xs"]
             if j not in basis:
-                basis[j] = _brightBasis(c["stamp"], ys, xs, S["xy"][j, 0] - X0, S["xy"][j, 1] - Y0,
-                                        S["xy"][j], amps[j], good, var, R, fwhm, zones, radial,
-                                        haloModes, brightModes, coreRings, coreSigma, coreModes)
+                key = (round(float(S["xy"][j, 0]), 6), round(float(S["xy"][j, 1]), 6),
+                       ys.start, ys.stop, xs.start, xs.stop,
+                       hash(np.ascontiguousarray(good[ys, xs]).tobytes()),
+                       hash(c["stamp"].tobytes()))
+                if cache is not None and key in cache:
+                    basis[j] = cache[key]
+                else:
+                    basis[j] = _brightBasis(c["stamp"], ys, xs, S["xy"][j, 0] - X0,
+                                            S["xy"][j, 1] - Y0, S["xy"][j], amps[j], good, var, R,
+                                            fwhm, zones, radial, haloModes, brightModes, coreRings,
+                                            coreSigma, coreModes)
+                    if basis[j] is not None:
+                        basis[j]["amp"] = float(amps[j])
+                    if cache is not None:
+                        cache[key] = basis[j]
             B = basis[j]
             if j in imgs:
                 corr[ys, xs] -= imgs[j]
@@ -1986,10 +2008,11 @@ def brightStarCorrections(exposure, S, fit, model, psfPeak, noise, fwhm, badBitm
             if sweep == sweeps - 1:
                 r2 = r - (imgs[j][sel] * w)
                 ring = B["rr"] < R
+                k = B.get("amp", amps[j]) / amps[j]     # the basis may carry an earlier flux
                 info[j] = dict(x=float(S["xy"][j, 0]), y=float(S["xy"][j, 1]), snr=float(snr[j]),
-                               nSat=int((sat[ys, xs] & ring).sum()), flux=float(coef[0] * amps[j]),
-                               dfluxPct=float(100 * coef[0]),
-                               dx=float(-coef[1]), dy=float(-coef[2]),
+                               nSat=int((sat[ys, xs] & ring).sum()),
+                               flux=float(coef[0] * amps[j] * k), dfluxPct=float(100 * coef[0] * k),
+                               dx=float(-coef[1] * k), dy=float(-coef[2] * k),
                                chi2Before=float(np.mean(r ** 2)), chi2After=float(np.mean(r2 ** 2)))
     return corr, info
 
@@ -2861,6 +2884,7 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
     hist = dict(residStd=[rstd(data)], nPeaks=[0], nZero=[0])
     snaps, firstSeen, log = [], {}, []
     bcorr = {}
+    bcCache = {} if P["brightCorrCache"] else None      # bright-star fit bases, kept for this pass
     stampPt = bbox.getCenter()
 
     def corrected(fit):
@@ -2880,7 +2904,7 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
                                                 brightModes=P["brightAngularModes"],
                                                 coreRings=P["brightCoreRingsPx"],
                                                 coreSigma=P["brightCoreRingSigma"],
-                                                coreModes=P["brightCoreModes"])
+                                                coreModes=P["brightCoreModes"], cache=bcCache)
         return fit["modelFull"] + corr
     prevAmpUid = {}
     diag, stop, noProg = None, "maxInner", 0
@@ -4524,8 +4548,15 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
               f"{L._fwhm(psfW, c):.3f}px, shape cut {'ON' if shapeNow else 'off'} =====")
         t0 = time.perf_counter()
         with L.TIMER.step("INNER LOOP (total)", outer=k, kind="wall"):
-            res = runInnerAdaptive(expW, psfW, badBitmask, S, P, outerIdx=k,
+            light = bool(P["lightFirstPass"] and P["refitPsf"] and k + 1 < P["maxOuter"])
+            Pk = dict(P, brightCorr=False, skyRounds=1) if light else P
+            if light:
+                print("  light pass (a PSF refit follows): no bright-star corrections, one sky "
+                      "round per update")
+            res = runInnerAdaptive(expW, psfW, badBitmask, S, Pk, outerIdx=k,
                                    thresholdStart=thr0, shapeNow=shapeNow)
+            if light and "_haloRejects" in Pk:
+                P["_haloRejects"] = Pk["_haloRejects"]
         S = res["S"]
         res["adaptive"]["seconds"] = time.perf_counter() - t0
         hist.append(dict(psf=psfW, exposure=expW, result=res, version=__version__,

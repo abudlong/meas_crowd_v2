@@ -181,6 +181,27 @@ class BrightStarCorrectionsTestCase(unittest.TestCase):
             for k, v in infoRef[j].items():
                 self.assertAlmostEqual(info[j][k], v, delta=1e-7 * max(1.0, abs(v)), msg=f"{j} {k}")
 
+        # the per-pass basis cache: a later call with other fluxes (same positions) reuses every
+        # basis and gives what an uncached call gives
+        cache = {}
+        pl.brightStarCorrections(*args, **kw, cache=cache)
+        nBuilt = len(cache)
+        self.assertEqual(nBuilt, len(info))
+        fit2 = dict(fit, amps=fit["amps"] * np.where(np.arange(len(xy)) % 2, 1.07, 0.96))
+        args2 = (exp, dict(xy=xy), fit2, fit["modelFull"], psfPeak, 20.0, 2.3548 * sigma, 1)
+        c1, i1 = pl.brightStarCorrections(*args2, **kw, cache=cache)
+        c0, i0 = pl.brightStarCorrections(*args2, **kw)
+        self.assertEqual(len(cache), nBuilt)                      # nothing rebuilt
+        np.testing.assert_allclose(c1, c0, rtol=0, atol=1e-8 * np.abs(c0).max())
+        for j in i0:
+            for k, v in i0[j].items():
+                self.assertAlmostEqual(i1[j][k], v, delta=1e-6 * max(1.0, abs(v)), msg=f"{j} {k}")
+        xyMoved = xy.copy()                                       # a moved star gets a new basis
+        xyMoved[1] += 0.3
+        pl.brightStarCorrections(exp, dict(xy=xyMoved), fit, fit["modelFull"], psfPeak, 20.0,
+                                 2.3548 * sigma, 1, **kw, cache=cache)
+        self.assertGreater(len(cache), nBuilt)
+
 
 class WindowedDerivativesTestCase(unittest.TestCase):
     @unittest.skipUnless(__import__("lsst.meas.crowd.fastKernels", fromlist=["x"])._HAVE_WINDOW,
@@ -449,6 +470,7 @@ class MedianSkyTestCase(unittest.TestCase):
         self.assertEqual(P["skyMeshSmooth"], 1)
         self.assertEqual(P["skyJointMeshPx"], 0)
         self.assertEqual(P["detectLocalBgPx"], 16)
+        self.assertTrue(P["brightCorrCache"])
 
 
 class MedianSkyMeshTestCase(unittest.TestCase):
