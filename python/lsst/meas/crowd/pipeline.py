@@ -87,6 +87,8 @@ PIPELINE_DEFAULTS = dict(
     satGrowPx=2,             # also exclude pixels within this many px of SAT (non-linear,
                                # charge spill); 0 = off
     brightCorr=True,          # per-bright-star shift + width + flux correction terms
+    lightDropNearBrightFwhm=3.0,   # after a light pass: drop faint non-Gaia sources within this many
+    lightDropMaxRatio=0.05,        #   FWHM of a bright star and below this flux ratio to it
     lightFirstPass=False,     # passes followed by a PSF refit run without bright-star corrections
                               #   and with one sky round per update (they only find the sources
                               #   and the PSF stars; the last pass redoes everything)
@@ -1210,6 +1212,28 @@ def _take(S, keep):
     keep = np.asarray(keep)
     out = {k: S[k][keep] for k in ("xy", "fromGaia", "ext", "g", "ref", "gaia", "uid")}
     out["nextUid"] = S["nextUid"]
+    return out
+
+
+def _nearBrightFakes(S, amps, snr, bright, radius, maxRatio):
+    """Return a mask of the non-Gaia sources that may be fakes around bright stars.
+
+    A source is flagged when it did not start from Gaia, is not bright itself, lies within
+    ``radius`` px of a bright star and has less than ``maxRatio`` of that star's flux: the leftover
+    light of a bright star fitted without its correction terms is found as such faint "sources".
+    """
+    n = len(S["xy"])
+    out = np.zeros(n, bool)
+    bi = np.flatnonzero(bright)
+    if n == 0 or len(bi) == 0 or radius <= 0:
+        return out
+    from scipy.spatial import cKDTree
+    tree = cKDTree(S["xy"][bi])
+    for j in np.flatnonzero(~np.asarray(S["fromGaia"], bool) & ~bright):
+        for b in tree.query_ball_point(S["xy"][j], radius):
+            if amps[j] < maxRatio * amps[bi[b]]:
+                out[j] = True
+                break
     return out
 
 
@@ -3356,7 +3380,9 @@ def refitPsfPiff(exposure, psf, res, P, point, verbose=True):
     if len(idx) < P["piffMinStars"]:
         raise RuntimeError(f"{len(idx)} clean PSF stars, PIFF needs >= {P['piffMinStars']}")
     clean = exposure.clone()
-    clean.image.array[:] = psfStarImage(exposure, fit, idx).astype(clean.image.array.dtype)
+    keepLight = np.union1d(idx, np.asarray(res.get("lightFakes", []), int))   # fakes' light is the
+    clean.image.array[:] = psfStarImage(exposure, fit, keepLight).astype(     # stars' own wings
+        clean.image.array.dtype)
     clean.setPsf(psf)
     schema = L.afwTable.SourceTable.makeMinimalSchema()
     centroid = L.afwTable.Point2DKey.addFields(schema, "centroid", "fitted position", "pixel")
@@ -4558,6 +4584,24 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
             if light and "_haloRejects" in Pk:
                 P["_haloRejects"] = Pk["_haloRejects"]
         S = res["S"]
+        if light and P["lightDropNearBrightFwhm"] and len(S["xy"]):
+            # the light pass fitted bright stars without their correction terms, so their leftover
+            # light was found as faint sources around them: drop those before the next pass,
+            # which has the corrections and finds the real neighbours again
+            kpk = psfW.computeKernelImage(c).array
+            peak = float(kpk.max() / kpk.sum())
+            nse = float(np.sqrt(np.nanmedian(expW.variance.array)))
+            amps = np.asarray(res["amps"], float)
+            snrS = amps * peak / nse
+            fake = _nearBrightFakes(S, amps, snrS, snrS > P["brightCorrSigma"],
+                                    P["lightDropNearBrightFwhm"] * L._fwhm(psfW, c),
+                                    P["lightDropMaxRatio"])
+            res["lightFakes"] = np.flatnonzero(fake)      # their light goes back for the PSF fit
+            if fake.any():
+                S = _take(S, ~fake)
+                print(f"  light pass: {int(fake.sum())} faint non-Gaia source(s) within "
+                      f"{P['lightDropNearBrightFwhm']:g} FWHM of a bright star dropped (the next "
+                      f"pass finds the real ones again)")
         res["adaptive"]["seconds"] = time.perf_counter() - t0
         hist.append(dict(psf=psfW, exposure=expW, result=res, version=__version__,
                          bf=None if _BF["prof"] is None else

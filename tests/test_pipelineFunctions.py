@@ -597,5 +597,24 @@ class StellarConfigTestCase(unittest.TestCase):
         self.assertEqual((P["piffSpatialOrder"], P["psfStackN"]), (0, 40))   # constant, 40 stars
 
 
+class NearBrightFakesTestCase(unittest.TestCase):
+    """`pipeline._nearBrightFakes`: faint non-Gaia sources around bright stars after a light pass."""
+
+    def test(self):
+        S = pl._state(np.array([[50.0, 50], [54, 50], [50, 62], [80, 80], [53, 52], [30, 30]]))
+        S["fromGaia"][4] = True                          # a Gaia star near the bright one: kept
+        amps = np.array([1e6, 2e3, 3e3, 2e3, 2e3, 1e6])
+        snr = amps / 10.0
+        bright = snr > 1e4
+        fake = pl._nearBrightFakes(S, amps, snr, bright, radius=10.0, maxRatio=0.05)
+        # 1: within 10 px, faint -> fake; 2: 12 px away -> kept; 3: far -> kept; 4: Gaia -> kept;
+        # 0 and 5 are bright themselves
+        np.testing.assert_array_equal(fake, [False, True, False, False, False, False])
+        amps2 = amps.copy()
+        amps2[1] = 8e4                                   # 8% of the bright star: kept
+        self.assertFalse(pl._nearBrightFakes(S, amps2, snr, bright, 10.0, 0.05)[1])
+        self.assertFalse(pl._nearBrightFakes(S, amps, snr, np.zeros(6, bool), 10.0, 0.05).any())
+
+
 if __name__ == "__main__":
     unittest.main()
