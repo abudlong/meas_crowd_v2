@@ -339,6 +339,15 @@ the residual-stack refit used before (bottom-right scatter 1.12 vs 1.30), which 
 
 With fewer than `piffMinStars` = 10 clean stars, or if PIFF fails, the pass's PSF is kept.
 
+**Detector PSF** (`detectorPsf`, whole-detector runs).  Refitting the PSF in every tile costs a
+second pass per tile.  Instead, `fitDetectorPsf` fits about 16 tiles spread over the detector
+(`sampleTiles`, `detectorPsfTiles`) in one pass with the visit PSF, takes up to 25 clean stars
+from each (`detectorPsfStarsPerTile`) with every other source subtracted (`psfStarSample`), pastes
+those images into a copy of the visit image and fits one PIFF PSF to all of them (`fitPiff`) with
+a `detectorPsfOrder` = 2 polynomial variation over the detector.  Every tile then gets one pass
+with that PSF and no refit.  With too few stars, or if PIFF fails, the tiles refit their PSF one
+by one as before.
+
 Off by default (they did not help on the test data): a median-stack core correction
 (`psfCoreMedian`) and a brightness-dependent PSF (`bfTerm`).
 

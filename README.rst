@@ -307,7 +307,12 @@ sky between the stars (25th percentile + 0.674 sigma per cell, twice with a flux
 updated before every inner iteration and at the end (``skyMedian="mesh"``): the visit image's
 background is over-subtracted around dense star groups.  On LSSTCam detector 144 the visit PSF is
 wrong in the corners; the PIFF refit took the bottom-right corner from 713 to 969 sources and the
-residual on the stars from -0.15 to -0.005 sigma, at about twice the time of one pass.
+residual on the stars from -0.15 to -0.005 sigma, at about twice the time of one pass.  In a
+whole-detector run (``fitTiles``) the preset instead fits one PIFF PSF for the whole detector
+(``detectorPsf``): 16 tiles spread over it get one pass with the visit PSF, their clean stars
+(25 each, neighbours subtracted) go into one PIFF fit with a quadratic variation over the detector
+(``detectorPsfOrder``), and then every tile gets a single pass with that PSF.  If the detector
+PSF cannot be fitted, the tiles fall back to the per-tile refit.
 ``fitTiles(..., nJobs=N)`` (``--n-jobs``) fits N tiles at once in worker processes.
 
 The per-source loops of the joint fit run in C++ (``src/jointFit.cc``: the design matrix, source

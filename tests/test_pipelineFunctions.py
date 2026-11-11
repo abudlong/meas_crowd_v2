@@ -595,6 +595,7 @@ class StellarConfigTestCase(unittest.TestCase):
         self.assertEqual((P["maxOuter"], P["minOuter"]), (2, 2))   # pass, PIFF refit, pass
         self.assertEqual(P["refitPsf"], "piff")
         self.assertEqual((P["piffSpatialOrder"], P["psfStackN"]), (0, 40))   # constant, 40 stars
+        self.assertTrue(P["detectorPsf"])                  # fitTiles: one PSF for the detector
 
 
 class NearBrightFakesTestCase(unittest.TestCase):

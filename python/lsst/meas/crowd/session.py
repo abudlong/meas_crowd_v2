@@ -148,6 +148,8 @@ FAST_STELLAR_FIELD_CONFIG = dict(
                                  #   bias a median high, most in the densest, most over-subtracted parts)
     skyMeshSmooth=1,             # no median filter over cells: it flattened the dips
     skyRounds=2,                 # sky, flux refit, sky: the fit first absorbs a dip into the fluxes
+    detectorPsf=True,            # whole-detector runs (fitTiles): one PIFF PSF for the detector from
+                                 #   16 sampled tiles, then one pass per tile (cutout runs ignore it)
 )
 
 

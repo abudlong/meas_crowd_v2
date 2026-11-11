@@ -200,6 +200,12 @@ PIPELINE_DEFAULTS = dict(
     piffSpatialOrder=0,       # refitPsf="piff": polynomial order of PIFF's variation over a cutout
                               #   (0 = constant: as good on LSSTCam det 144 and half the time)
     piffMinStars=10,          # refitPsf="piff": fewer clean stars -> the pass's PSF is kept
+    detectorPsf=False,        # fitTiles: fit one PIFF PSF for the whole detector from a sample of
+                              #   tiles (one pass each), then fit every tile in one pass with it
+                              #   (no per-tile PSF refit)
+    detectorPsfTiles=16,      # detectorPsf: tiles sampled (a grid over the detector)
+    detectorPsfStarsPerTile=25,   # detectorPsf: clean PSF stars taken from each sampled tile
+    detectorPsfOrder=2,       # detectorPsf: polynomial order of the PSF's variation over the detector
     bgMode="plane",           # background refit between passes: "plane" (tilted plane, sigma-clipped),
                                #   "constant", "spline" (SubtractBackgroundTask surface on bgBinSize
                                #   bins -- can swing by 100s of counts in the corners of a small,
@@ -3369,8 +3375,6 @@ def refitPsfPiff(exposure, psf, res, P, point, verbose=True):
     RuntimeError
         Too few PSF stars, or no usable candidates.
     """
-    from lsst.daf.base import PropertyList
-    from lsst.meas.extensions.piff.piffPsfDeterminer import PiffPsfDeterminerTask
     fit = res["snaps"][-1]["fit"]
     fwhm = L._fwhm(psf, point)
     k = psf.computeKernelImage(point).array
@@ -3384,6 +3388,54 @@ def refitPsfPiff(exposure, psf, res, P, point, verbose=True):
     clean.image.array[:] = psfStarImage(exposure, fit, keepLight).astype(     # stars' own wings
         clean.image.array.dtype)
     clean.setPsf(psf)
+    xy = np.asarray(res["S"]["xy"], float)[idx]
+    amps = np.asarray(fit["amps"], float)
+    peaks = np.array([amps[j] * psfPeak if j < len(amps) else 0.0 for j in idx])
+    psfNew, nCands, cfg, model, stamp = fitPiff(clean, xy, peaks, P, verbose=verbose)
+    if verbose:
+        print(f"  PIFF PSF refit: {nCands} neighbour-subtracted stars (of {len(idx)} selected), "
+              f"spatial order {cfg.spatialOrder}, model {model} px, stamps {stamp} px; FWHM {fwhm:.3f} -> "
+              f"{L._fwhm(psfNew, point):.3f} px")
+    return psfNew
+
+
+def fitPiff(clean, xy, peaks, P, spatialOrder=None, verbose=True):
+    """Fit a PIFF PSF to stars on a neighbour-subtracted image.
+
+    Each star becomes a PSF candidate at its position, with a circular footprint and peak (the
+    stack's candidate code needs them); stars whose stamp does not fit in the image are left out.
+    The PIFF model is ``piffStampSize`` px on stamps 2 px larger (PIFF's own size check rejects a
+    star whose stamp is not larger than the model, by a rounding error).
+
+    Parameters
+    ----------
+    clean : `lsst.afw.image.Exposure`
+        Image with the stars alone (every other source subtracted); its PSF is the starting one.
+    xy : `numpy.ndarray`
+        Star positions (parent px), shape (N, 2).
+    peaks : `numpy.ndarray`
+        Peak value of every star (for the footprints).
+    P : `dict`
+        Pipeline options (``piffStampSize``, ``piffSpatialOrder``).
+    spatialOrder : `int`, optional
+        Polynomial order of the PSF's variation over the image (default ``piffSpatialOrder``).
+    verbose : `bool`, optional
+        Print a report if PIFF fails.
+
+    Returns
+    -------
+    psf : `lsst.afw.detection.Psf`
+        The PIFF PSF.
+    nCands : `int`
+        Stars given to PIFF.
+    cfg : `lsst.pex.config.Config`
+        The PIFF determiner's configuration.
+    model, stamp : `int`
+        PIFF model size and star stamp size [px].
+    """
+    from lsst.daf.base import PropertyList
+    from lsst.meas.extensions.piff.piffPsfDeterminer import PiffPsfDeterminerTask
+    xy = np.asarray(xy, float).reshape(-1, 2)
     schema = L.afwTable.SourceTable.makeMinimalSchema()
     centroid = L.afwTable.Point2DKey.addFields(schema, "centroid", "fitted position", "pixel")
     schema.getAliasMap().set("slot_Centroid", "centroid")
@@ -3392,10 +3444,8 @@ def refitPsfPiff(exposure, psf, res, P, point, verbose=True):
     stamp = model + 2                             # star stamps a little larger: PIFF rejects a star
     #   whose stamp is not larger than the model by its own floating-point check (25 px stamps
     #   failed as "smaller than 25.000000000000004 px" on one side of a detector)
-    ebox = exposure.getBBox()
-    amps = np.asarray(fit["amps"], float)
-    for j in idx:
-        x, y = float(res["S"]["xy"][j, 0]), float(res["S"]["xy"][j, 1])
+    ebox = clean.getBBox()
+    for (x, y), pk in zip(xy, peaks):
         # every candidate needs a footprint with a peak: the stack's PSF-candidate code reads it
         # without checking (a catalogue of bare positions crashes the kernel)
         center = L.geom.Point2I(int(round(x)), int(round(y)))
@@ -3408,12 +3458,12 @@ def refitPsfPiff(exposure, psf, res, P, point, verbose=True):
         if spans.getArea() == 0:
             continue
         fp = L.afwDetect.Footprint(spans, ebox)
-        fp.addPeak(x, y, float(amps[j] * psfPeak) if j < len(amps) else 0.0)
+        fp.addPeak(float(x), float(y), float(pk))
         rec = cat.addNew()
         rec.setFootprint(fp)
-        rec.set(centroid, L.geom.Point2D(x, y))
+        rec.set(centroid, L.geom.Point2D(float(x), float(y)))
     if not len(cat):
-        raise RuntimeError("no PSF star inside the cutout")
+        raise RuntimeError("no PSF star inside the image")
     cat = cat.copy(deep=True)                     # contiguous, as the tasks require
     mkCfg = L.MakePsfCandidatesTask.ConfigClass()
     mkCfg.kernelSize = stamp
@@ -3422,7 +3472,7 @@ def refitPsfPiff(exposure, psf, res, P, point, verbose=True):
     if not cands:
         raise RuntimeError("no usable PSF candidates")
     cfg = PiffPsfDeterminerTask.ConfigClass()
-    cfg.spatialOrder = int(P["piffSpatialOrder"])
+    cfg.spatialOrder = int(P["piffSpatialOrder"] if spatialOrder is None else spatialOrder)
     for name in ("stampSize", "kernelSize"):     # the field's name depends on the stack version
         if hasattr(cfg, name):
             setattr(cfg, name, stamp)
@@ -3432,15 +3482,59 @@ def refitPsfPiff(exposure, psf, res, P, point, verbose=True):
         out = PiffPsfDeterminerTask(config=cfg).determinePsf(clean, cands, PropertyList())
     except Exception:
         if verbose:
-            _piffFailureReport(clean, res["S"]["xy"][idx], stamp, cfg)
+            _piffFailureReport(clean, xy, stamp, cfg)
             _piffWhy(PiffPsfDeterminerTask, cfg, clean, cands, PropertyList)
         raise
     psfNew = out[0] if isinstance(out, tuple) else out
-    if verbose:
-        print(f"  PIFF PSF refit: {len(cands)} neighbour-subtracted stars (of {len(idx)} selected), "
-              f"spatial order {cfg.spatialOrder}, model {model} px, stamps {stamp} px; FWHM {fwhm:.3f} -> "
-              f"{L._fwhm(psfNew, point):.3f} px")
-    return psfNew
+    return psfNew, len(cands), cfg, model, stamp
+
+
+def psfStarSample(run, interior, P, verbose=False):
+    """Clean PSF stars of a fitted tile, for a detector-level PSF fit.
+
+    Picks up to ``psfStackN`` clean stars (`selectPsfStars`) inside ``interior`` and returns the
+    tile's neighbour-subtracted image over the interior (`psfStarImage`: only those stars' light
+    left on top of the residual) with their positions and peak values.
+
+    Parameters
+    ----------
+    run : `lsst.meas.crowd.session.CutoutRun`
+        A fitted tile (its last pass is used).
+    interior : `lsst.geom.Box2I`
+        The tile's interior (parent px).
+    P : `dict`
+        Pipeline options.
+    verbose : `bool`, optional
+        Print the star selection.
+
+    Returns
+    -------
+    sample : `dict`
+        ``x0``, ``y0`` (parent px of ``image[0, 0]``), ``image`` (float32), ``xy`` (N, 2) and
+        ``peaks`` (N,).
+    """
+    h = run.outerHistory[-1]
+    exposure, res, psf = h["exposure"], h["result"], h["psf"]
+    fit = res["snaps"][-1]["fit"]
+    point = interior.getCenter() if hasattr(interior, "getCenter") else exposure.getBBox().getCenter()
+    fwhm = L._fwhm(psf, point)
+    k = psf.computeKernelImage(point).array
+    psfPeak = float(k.max() / k.sum())
+    noise = float(np.sqrt(np.nanmedian(exposure.variance.array)))
+    idx = np.asarray(selectPsfStars(exposure, res, fwhm, psfPeak, noise, P, verbose=verbose), int)
+    xyAll = np.asarray(res["S"]["xy"], float)
+    ix0, iy0 = interior.getMinX(), interior.getMinY()
+    ix1, iy1 = interior.getMaxX(), interior.getMaxY()
+    if len(idx):
+        inside = ((xyAll[idx, 0] >= ix0) & (xyAll[idx, 0] <= ix1)
+                  & (xyAll[idx, 1] >= iy0) & (xyAll[idx, 1] <= iy1))
+        idx = idx[inside]
+    img = psfStarImage(exposure, fit, idx)
+    eb = exposure.getBBox()
+    sub = img[iy0 - eb.getMinY():iy1 - eb.getMinY() + 1, ix0 - eb.getMinX():ix1 - eb.getMinX() + 1]
+    amps = np.asarray(fit["amps"], float)
+    return dict(x0=int(ix0), y0=int(iy0), image=np.asarray(sub, np.float32),
+                xy=xyAll[idx].copy(), peaks=amps[idx] * psfPeak)
 
 
 def _piffWhy(task, cfg, exposure, cands, PropertyList, maxLines=40):

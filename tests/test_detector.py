@@ -77,7 +77,7 @@ class _Synthetic:
         self.var = 100 + truth
         self.data = truth + rng.normal(0, 1, shape) * np.sqrt(self.var)
         self.psf = lsstStubs.FakePsf(lsstStubs.gaussianKernel(sigma, half))
-        self.calls = []
+        self.calls, self.kws = [], []
         bb = geom.Box2I(geom.Point2I(0, 0), geom.Point2I(shape[1] - 1, shape[0] - 1))
         self.visitImage = types.SimpleNamespace(getBBox=lambda: bb)
 
@@ -113,9 +113,120 @@ class _Synthetic:
                    comps=comps)
         res = dict(S=S, snaps=[dict(fit=fit)], modelFull=model, amps=fl.copy(), brightCorr={},
                    peaks=[tuple(p) for p in xy])
-        run = types.SimpleNamespace(name=name, outerHistory=[dict(exposure=exp, result=res)],
+        self.kws.append(kw)
+        run = types.SimpleNamespace(name=name, outerHistory=[dict(exposure=exp, result=res,
+                                                                  psf=self.psf)],
                                     badBitmask=4, interiorBbox=job["interior"], config={})
         return {name: run}
+
+
+class _FullImage(lsstStubs.FakeExposure):
+    """A visit image that can be copied (for the detector PSF's clean image)."""
+
+    def clone(self):
+        import copy
+        return copy.deepcopy(self)
+
+    def setPsf(self, p):
+        self._psf = p
+
+
+class SampleTilesTestCase(unittest.TestCase):
+    def test(self):
+        specs = det.tileSpecs(4096, 4004, 400)
+        picks = det.sampleTiles(specs, 16, 4096, 4004)
+        self.assertEqual(len(picks), 16)
+        self.assertEqual(len(set(picks)), 16)
+        cx = np.array([s[0] + s[2] / 2 for s in picks])
+        cy = np.array([s[1] + s[3] / 2 for s in picks])
+        for c, n in ((cx, 4096), (cy, 4004)):
+            self.assertEqual(len(np.unique(c)), 4)  # 4 columns and rows, spread out
+            self.assertLess(c.min(), 0.25 * n)
+            self.assertGreater(c.max(), 0.75 * n)
+        few = specs[:5]
+        self.assertEqual(det.sampleTiles(few, 16, 4096, 4004), few)
+
+
+class DetectorPsfTestCase(unittest.TestCase):
+    """fitTiles(detectorPsf=True): one PIFF fit from sampled tiles, then one pass per tile."""
+
+    def setUp(self):
+        self.syn = _Synthetic()
+        self.syn.visitImage = _FullImage(self.syn.data.copy(), self.syn.var.copy())
+        self.tmp = tempfile.TemporaryDirectory()
+        self.newPsf = lsstStubs.FakePsf(lsstStubs.gaussianKernel(2.1, 12))
+        self.got = {}
+
+        def fakeFitPiff(clean, xy, peaks, P, spatialOrder=None, verbose=True):
+            self.got.update(clean=clean.image.array.copy(), xy=np.asarray(xy), order=spatialOrder)
+            if self.piffFails:
+                raise RuntimeError("PIFF says no")
+            return self.newPsf, len(xy), types.SimpleNamespace(spatialOrder=spatialOrder), 25, 27
+
+        self.piffFails = False
+        self.patches = [mock.patch.object(session, "prepareSession", self.syn.prepareSession),
+                        mock.patch.object(gaiaCatalog, "attachGaia", lambda *a, **k: None),
+                        mock.patch.object(pipeline, "runSessionGaia", self.syn.runSessionGaia),
+                        mock.patch.object(pipeline, "selectPsfStars",
+                                          lambda exp, res, *a, **k: np.arange(len(res["S"]["xy"]))),
+                        mock.patch.object(pipeline, "fitPiff", fakeFitPiff),
+                        mock.patch.object(pipeline.L, "_fwhm", lambda p, pt: 4.7, create=True)]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        self.tmp.cleanup()
+
+    def _fit(self):
+        sess = {}
+        real = self.syn.prepareSession
+
+        def keep(*a, **k):
+            sess["s"] = real(*a, **k)
+            sess["s"].psf = self.syn.psf
+            return sess["s"]
+
+        with mock.patch.object(session, "prepareSession", keep):
+            det.fitTiles(1, 2, config=dict(detectorPsf=True, detectorPsfTiles=4,
+                                           detectorPsfOrder=1),
+                         outDir=self.tmp.name, tile=200, pad=20, visitImage=self.syn.visitImage)
+        return sess["s"]
+
+    def testOneFitThenOnePassPerTile(self):
+        sess = self._fit()
+        self.assertEqual(len(self.syn.calls), 4 + 9)          # 4 sampled tiles, then all 9 tiles
+        for kw in self.syn.kws[:4]:                           # the samples: one pass, no refit
+            self.assertEqual((kw["maxOuter"], kw["refitPsf"]), (1, False))
+        for kw in self.syn.kws[4:]:                           # every tile: one pass, the new PSF
+            self.assertEqual((kw["maxOuter"], kw["minOuter"], kw["refitPsf"]), (1, 1, False))
+        self.assertIs(sess.psf, self.newPsf)
+        self.assertEqual(self.got["order"], 1)
+        # the PSF stars: every star inside the sampled tiles' interiors, on an image where they
+        # are alone (data - model + those stars) inside those interiors
+        picks = det.sampleTiles(det.tileSpecs(600, 500, 200), 4, 600, 500)
+        inAny = np.zeros(len(self.syn.xy), bool)
+        for x0, y0, w, h in picks:
+            inAny |= ((self.syn.xy[:, 0] >= x0) & (self.syn.xy[:, 0] <= x0 + w - 1)
+                      & (self.syn.xy[:, 1] >= y0) & (self.syn.xy[:, 1] <= y0 + h - 1))
+        self.assertEqual(len(self.got["xy"]), int(inAny.sum()))
+        x0, y0, w, h = picks[0]
+        sl = (slice(y0, y0 + h), slice(x0, x0 + w))
+        stars = np.zeros(self.syn.shape)
+        for (x, y), f in zip(self.syn.xy, self.syn.flux):
+            if x0 <= x <= x0 + w - 1 and y0 <= y <= y0 + h - 1:
+                stars += lsstStubs.place(self.syn.shape, lsstStubs.gaussianComp(
+                    self.syn.shape, x, y, self.syn.sigma, self.syn.half), f)
+        expect = (self.syn.data - self.syn.truth + stars)[sl]
+        np.testing.assert_allclose(self.got["clean"][sl], expect, atol=1e-3 * stars.max())
+        self.assertTrue(os.path.exists(os.path.join(self.tmp.name, "logs")))
+
+    def testPiffFailureKeepsThePerTileRefit(self):
+        self.piffFails = True
+        sess = self._fit()
+        self.assertIs(sess.psf, self.syn.psf)
+        self.assertNotIn("refitPsf", self.syn.kws[-1])        # the usual per-tile settings
 
 
 class FitStitchTestCase(unittest.TestCase):

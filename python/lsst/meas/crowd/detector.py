@@ -382,6 +382,17 @@ def fitTiles(visit, detector, config=None, outDir="detector_run", tile=400, pad=
     names = [tileName(s) for s in todo]
     if nJobs == "auto":
         nJobs = availableCpus()
+    from .pipeline import _params
+    try:
+        P = _params(dict(cfg, **kw))
+    except ValueError:                           # overrides that are not pipeline options
+        P = _params(cfg)
+    if P["detectorPsf"]:
+        psfDet = fitDetectorPsf(sess, visitImage, todo, cfg, kw, P, nJobs, outDir)
+        if psfDet is not None:
+            sess.psf = psfDet                    # every tile: one pass with the detector's PSF
+            kw.update(maxOuter=1, minOuter=1, refitPsf=False)
+            _TILE["kw"] = kw
     if nJobs and nJobs > 1 and len(names) > 1:
         import multiprocessing as mp
         from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -495,6 +506,191 @@ def limitBlasThreads(n=None, verbose=True):
 
 # ---------------------------------------------------------------- fitting one tile
 _TILE = {}       # state shared with forked tile workers (set by fitTiles, nothing is pickled)
+
+
+def sampleTiles(specs, n, width, height, x0=0, y0=0):
+    """Pick about ``n`` tiles spread over the detector: the tile nearest each point of an even grid.
+
+    Parameters
+    ----------
+    specs : `list` [`tuple`]
+        Tile specs (x0, y0, w, h) as `tileSpecs` returns them.
+    n : `int`
+        Number of tiles wanted (rounded to a square grid).
+    width, height : `int`
+        Detector size [px].
+    x0, y0 : `int`, optional
+        Detector origin [px].
+
+    Returns
+    -------
+    picks : `list` [`tuple`]
+        The chosen specs (no repeats; all of them when there are at most ``n``).
+    """
+    specs = list(specs)
+    if len(specs) <= n:
+        return specs
+    k = max(1, int(round(np.sqrt(n))))
+    cx = np.array([s[0] + s[2] / 2 for s in specs])
+    cy = np.array([s[1] + s[3] / 2 for s in specs])
+    picks = []
+    for fy in (np.arange(k) + 0.5) / k:
+        for fx in (np.arange(k) + 0.5) / k:
+            d = np.hypot(cx - (x0 + fx * width), cy - (y0 + fy * height))
+            for i in np.argsort(d):
+                if specs[i] not in picks:
+                    picks.append(specs[i])
+                    break
+    return picks
+
+
+def _psfSampleTile(name):
+    """Fit one sampled tile (one pass, the session's PSF) and return its clean PSF stars.
+
+    Parameters
+    ----------
+    name : `str`
+        Tile name.
+
+    Returns
+    -------
+    result : `tuple`
+        (name, sample dict or None, error text or None, seconds).
+    """
+    import contextlib
+    import io
+    from .pipeline import psfStarSample, runSessionGaia
+    sess, cfgS, kwS, P = _TILE["sess"], _TILE["sampleCfg"], _TILE["sampleKw"], _TILE["sampleP"]
+    t0 = time.perf_counter()
+    try:
+        interior = sess.jobs[name]["interior"]
+        logDir = _TILE.get("logDir")
+        fh = open(os.path.join(logDir, f"psfsample_{name}.log"), "w") if logDir else io.StringIO()
+        with fh, contextlib.redirect_stdout(fh), contextlib.redirect_stderr(fh):
+            run = runSessionGaia(sess, cfgS, names=[name], plotFinal=False, **kwS)[name]
+            sample = psfStarSample(run, interior, P, verbose=True)
+        return name, sample, None, time.perf_counter() - t0
+    except Exception as e:
+        return name, None, f"{type(e).__name__}: {e}", time.perf_counter() - t0
+
+
+def _psfSampleWorker(name):
+    """`_psfSampleTile` in a forked worker with one BLAS thread."""
+    import contextlib
+    try:
+        from threadpoolctl import threadpool_limits
+        limit = threadpool_limits(1)
+    except Exception:
+        limit = contextlib.nullcontext()
+    with limit:
+        return _psfSampleTile(name)
+
+
+def fitDetectorPsf(sess, visitImage, specs, cfg, kw, P, nJobs=1, outDir=None, verbose=True):
+    """Fit one PIFF PSF for the whole detector from a sample of tiles.
+
+    About ``detectorPsfTiles`` tiles spread over the detector (`sampleTiles`) are fitted in one
+    pass with the session's PSF (no PSF refit); from each, up to ``detectorPsfStarsPerTile`` clean
+    stars are taken with every other source subtracted (`lsst.meas.crowd.pipeline.psfStarSample`).
+    Their images are pasted into a copy of the visit image, and PIFF is fitted to all of them at
+    once with a ``detectorPsfOrder`` polynomial variation over the detector
+    (`lsst.meas.crowd.pipeline.fitPiff`).
+
+    Parameters
+    ----------
+    sess : `lsst.meas.crowd.session.Session`
+        The session; its jobs must include the sampled tiles.
+    visitImage : `lsst.afw.image.Exposure`
+        The visit image.
+    specs : `list` [`tuple`]
+        Tile specs to sample from.
+    cfg : `dict`
+        Pipeline configuration.
+    kw : `dict`
+        Overrides passed to ``runSessionGaia``.
+    P : `dict`
+        Pipeline options (`lsst.meas.crowd.pipeline._params`).
+    nJobs : `int`, optional
+        Parallel worker processes.
+    outDir : `str`, optional
+        Where the sample logs (``logs/psfsample_<tile>.log``) and the PSF
+        (``detector_psf.fits``) go.
+    verbose : `bool`, optional
+        Print progress.
+
+    Returns
+    -------
+    psf : `lsst.afw.detection.Psf` or `None`
+        The detector PSF; None if the fit failed (the tiles then refit their PSF one by one).
+    """
+    from . import fitLib as L
+    from .pipeline import fitPiff
+    t0 = time.perf_counter()
+    bb = visitImage.getBBox()
+    picks = sampleTiles(specs, int(P["detectorPsfTiles"]), bb.getWidth(), bb.getHeight(),
+                        bb.getMinX(), bb.getMinY())
+    names = [tileName(s) for s in picks]
+    _TILE.update(sampleCfg=cfg, sampleP=dict(P, psfStackN=int(P["detectorPsfStarsPerTile"])),
+                 sampleKw=dict(kw, maxOuter=1, minOuter=1, refitPsf=False))
+    if outDir:
+        _TILE["logDir"] = os.path.join(outDir, "logs")
+        os.makedirs(_TILE["logDir"], exist_ok=True)
+    if verbose:
+        print(f"detector PSF: one pass on {len(names)} sampled tile(s) for the PSF stars ...")
+    if nJobs and nJobs > 1 and len(names) > 1:
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(min(int(nJobs), len(names)),
+                                 mp_context=mp.get_context("fork")) as ex:
+            results = list(ex.map(_psfSampleWorker, names))
+    else:
+        results = [_psfSampleTile(n) for n in names]
+    tSample = time.perf_counter() - t0
+    clean = visitImage.clone()
+    xy, peaks = [], []
+    for name, sample, err, secs in results:
+        if sample is None:
+            if verbose:
+                print(f"  {name}: FAILED ({err})")
+            continue
+        img = sample["image"]
+        ys = slice(sample["y0"] - bb.getMinY(), sample["y0"] - bb.getMinY() + img.shape[0])
+        xs = slice(sample["x0"] - bb.getMinX(), sample["x0"] - bb.getMinX() + img.shape[1])
+        clean.image.array[ys, xs] = img
+        xy.append(sample["xy"])
+        peaks.append(sample["peaks"])
+        if verbose:
+            print(f"  {name}: {len(sample['xy'])} PSF star(s), {secs:.0f} s")
+    xy = np.vstack(xy) if xy else np.zeros((0, 2))
+    peaks = np.concatenate(peaks) if peaks else np.zeros(0)
+    need = max(int(P["piffMinStars"]), 3 * (int(P["detectorPsfOrder"]) + 1) ** 2)
+    if len(xy) < need:
+        print(f"detector PSF: only {len(xy)} PSF star(s) (need {need}) -- keeping the per-tile "
+              f"PSF refit")
+        return None
+    clean.setPsf(sess.psf)
+    t1 = time.perf_counter()
+    try:
+        psf, nCands, pcfg, model, stamp = fitPiff(clean, xy, peaks, P,
+                                                  spatialOrder=int(P["detectorPsfOrder"]),
+                                                  verbose=verbose)
+    except Exception as e:
+        print(f"detector PSF: PIFF failed ({type(e).__name__}: {e}) -- keeping the per-tile "
+              f"PSF refit")
+        return None
+    tPiff = time.perf_counter() - t1
+    if verbose:
+        c = bb.getCenter()
+        print(f"detector PSF: PIFF from {nCands} stars of {len(names)} tiles, spatial order "
+              f"{pcfg.spatialOrder}, model {model} px; FWHM at the centre "
+              f"{L._fwhm(sess.psf, c):.3f} -> {L._fwhm(psf, c):.3f} px | sample {tSample:.0f} s "
+              f"+ PIFF {tPiff:.0f} s")
+    if outDir:
+        try:
+            psf.writeFits(os.path.join(outDir, "detector_psf.fits"))
+        except Exception as e:
+            print(f"  (could not save the detector PSF: {type(e).__name__}: {e})")
+    return psf
 
 
 def _fitTile(name):
