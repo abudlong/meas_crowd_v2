@@ -2170,7 +2170,7 @@ Tiles fitted by older versions have only DATA, MODEL, VARIANCE and BAD; this add
 
 Write one tile's results to a FITS file.
 
-DATA, MODEL, RESIDUAL, RESIDUAL_SIGMA, VARIANCE and BAD images over the tile's fit box (RESIDUAL = DATA - MODEL, RESIDUAL_SIGMA = RESIDUAL / sqrt(VARIANCE); header keys X0/Y0 = fit-box origin, IX0/IY0/IX1/IY1 = interior, inclusive) and a CATALOG table (the photometry, with an ``owned`` column: source inside this tile's interior, half-open so boundary sources belong to exactly one tile).  The file is written atomically.
+DATA, MODEL, RESIDUAL, RESIDUAL_SIGMA, VARIANCE and BAD images over the tile's fit box (RESIDUAL = DATA - MODEL, RESIDUAL_SIGMA = RESIDUAL / sqrt(VARIANCE), both NaN on bad pixels; header keys X0/Y0 = fit-box origin, IX0/IY0/IX1/IY1 = interior, inclusive) and a CATALOG table (the photometry, with an ``owned`` column: source inside this tile's interior, half-open so boundary sources belong to exactly one tile).  The file is written atomically.
 
 | Parameter | Type | Description |
 | --- | --- | --- |

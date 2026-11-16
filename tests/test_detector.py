@@ -392,6 +392,17 @@ class FitStitchTestCase(unittest.TestCase):
         self.assertTrue(os.path.getsize(png) > 1000)
         self.assertLess(abs(st["residualSigma"] - 1), 0.1)
 
+    def testResidualsBlankOnBadPixels(self):
+        """RESIDUAL and RESIDUAL_SIGMA are NaN on masked pixels (DATA / MODEL unchanged there)."""
+        data = np.array([[10.0, 20.0], [30.0, 40.0]])
+        model = np.array([[9.0, 5.0], [30.0, 38.0]])
+        var = np.array([[1.0, 4.0], [0.0, 4.0]])
+        bad = np.array([[0, 1], [0, 0]], np.uint8)
+        r, z = det._residuals(data, model, var, bad)
+        np.testing.assert_array_equal(np.isnan(r), [[False, True], [False, False]])
+        np.testing.assert_array_equal(np.isnan(z), [[False, True], [True, False]])
+        self.assertEqual((r[0, 0], r[1, 1], z[1, 1]), (1.0, 2.0, 1.0))
+
     def testResidualImages(self):
         from astropy.io import fits
         files = self._fit(region=(0, 150, 0, 150))                  # the corner tile

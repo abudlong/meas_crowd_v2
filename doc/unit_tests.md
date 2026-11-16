@@ -4,7 +4,7 @@ Every unit test in `tests/`: what it checks, what it feeds in, and what it must 
 pass.  How to run them and read the results is in the
 [pipeline guide](pipeline_guide.md#unit-tests-running-them-and-checking-the-results).
 
-The suite has **166 tests in 15 files**.  Without the Rubin stack 164 run and the 2 in
+The suite has **167 tests in 15 files**.  Without the Rubin stack 165 run and the 2 in
 `test_fastStampsStack.py` are skipped; `testCxxEqualsNumpy` is also skipped if the C++ extension
 was not built, and the `test_sparseSolver.py` solver tests if it was built without the
 sparse solver.  `test_docstrings.py` checks that this page lists every test and that the
@@ -297,6 +297,7 @@ real code.
 | `CpuLimitTestCase.testLimitBlasThreads` | `limitBlasThreads` caps NumPy's BLAS / OpenMP threads | a cap of 2 | every thread pool has <= 2 threads and the environment variables say 2 (skipped without threadpoolctl) |
 | `FitStitchTestCase.testPlot` | `plotDetector` | stitched mosaic; a zoom, greyscale, sources circled | PNG written; residual/σ spread ≈ 1; binning 1 for the zoom |
 | `FitStitchTestCase.testTile` | `loadTile`, `plotTile` | the corner tile | interior at (0, 0), width = interior + 20 px pad; `owned` count right; PNG written; residual/σ ≈ 1 |
+| `FitStitchTestCase.testResidualsBlankOnBadPixels` | Masked pixels in the residual images | a 2 x 2 image with one bad pixel and one zero variance | RESIDUAL NaN on the bad pixel; RESIDUAL_SIGMA NaN there and at zero variance; the rest data - model |
 | `FitStitchTestCase.testResidualImages` | Tile files and the mosaic carry the residual images | the corner tile; its stitched mosaic | tiles have DATA, MODEL, RESIDUAL, RESIDUAL_SIGMA, VARIANCE, BAD; RESIDUAL = DATA − MODEL and RESIDUAL_SIGMA = RESIDUAL / √VARIANCE; the mosaic has RESIDUAL_SIGMA with scatter ≈ 1; `loadMosaic` / `loadTile` return `residSigma` |
 | `FitStitchTestCase.testOldTilesGetResiduals` | Tiles written by older versions (no residual images) are upgraded without refitting | the corner tile with RESIDUAL / RESIDUAL_SIGMA removed | `addTileResiduals` rewrites it once (a second call changes nothing), the extensions are in order, and stitching still works |
 | `FitStitchTestCase.testCli` | `crowdDetector.py stitch` and `plot` | fitted tiles | both return 0; `detector_view.png` written |

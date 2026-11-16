@@ -38,7 +38,7 @@ its interior is kept:
    zoom, with optional tile boundaries.
 
 The image called DATA is the image the fit used (after the pipeline's background subtraction), so
-RESIDUAL = DATA - MODEL and RESIDUAL_SIGMA = RESIDUAL / sqrt(VARIANCE) (NaN on bad pixels).
+RESIDUAL = DATA - MODEL and RESIDUAL_SIGMA = RESIDUAL / sqrt(VARIANCE), both NaN on bad pixels.
 """
 
 __all__ = ["tileSpecs", "tileName", "saveTileProducts", "addTileResiduals", "fitTiles",
@@ -113,11 +113,15 @@ def tileName(spec):
 def _residuals(data, model, var, bad):
     """Return RESIDUAL = data - model and RESIDUAL_SIGMA = residual / sqrt(var) as float32.
 
-    RESIDUAL_SIGMA is NaN on bad pixels and where the variance is not positive.
+    Both are NaN on bad pixels (masked ones, e.g. saturated stars and their bleed trails: the fit
+    does not use them, the data there is the processing's interpolation and the model there is
+    unconstrained), and RESIDUAL_SIGMA also where the variance is not positive.  DATA and MODEL are
+    written as they are.
     """
     resid = (np.asarray(data, np.float32) - np.asarray(model, np.float32))
+    resid[np.asarray(bad) != 0] = np.nan
     var = np.asarray(var, np.float32)
-    ok = (np.asarray(bad) == 0) & np.isfinite(resid) & (var > 0)
+    ok = np.isfinite(resid) & (var > 0)
     residSigma = np.full(resid.shape, np.nan, np.float32)
     residSigma[ok] = resid[ok] / np.sqrt(var[ok])
     return resid, residSigma
@@ -166,10 +170,10 @@ def saveTileProducts(run, path, phot=None, meta=None):
     """Write one tile's results to a FITS file.
 
     DATA, MODEL, RESIDUAL, RESIDUAL_SIGMA, VARIANCE and BAD images over the tile's fit box
-    (RESIDUAL = DATA - MODEL, RESIDUAL_SIGMA = RESIDUAL / sqrt(VARIANCE); header keys X0/Y0 = fit-box
-    origin, IX0/IY0/IX1/IY1 = interior, inclusive) and a CATALOG table (the photometry, with an
-    ``owned`` column: source inside this tile's interior, half-open so boundary sources belong to
-    exactly one tile).  The file is written atomically.
+    (RESIDUAL = DATA - MODEL, RESIDUAL_SIGMA = RESIDUAL / sqrt(VARIANCE), both NaN on bad
+    pixels; header keys X0/Y0 = fit-box origin, IX0/IY0/IX1/IY1 = interior, inclusive) and a
+    CATALOG table (the photometry, with an ``owned`` column: source inside this tile's interior,
+    half-open so boundary sources belong to exactly one tile).  The file is written atomically.
 
     Parameters
     ----------
