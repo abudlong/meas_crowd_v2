@@ -339,23 +339,23 @@ the residual-stack refit used before (bottom-right scatter 1.12 vs 1.30), which 
 
 With fewer than `piffMinStars` = 10 clean stars, or if PIFF fails, the pass's PSF is kept.
 
-**Detector PSF** (`detectorPsf`, whole-detector runs).  Refitting the PSF in every tile costs a
-second pass per tile.  Instead, `fitDetectorPsf` fits about 25 tiles spread over the detector out
-to its edges and corners (`sampleTiles`, `detectorPsfTiles`: a grid from the first to the last
-tile centre, so the PSF is fitted at the edges rather than extrapolated) in one pass with the
-visit PSF, takes up to 25 clean stars
-from each (`detectorPsfStarsPerTile`) with every other source subtracted (`psfStarSample`), pastes
-those images into a copy of the visit image and fits one PIFF PSF to all of them (`fitPiff`) with
-a `detectorPsfOrder` = 2 polynomial variation over the detector.  Every tile then gets one pass
-with that PSF and no refit, and checks it (`psfFitQuality`): the joint-fit residual (without the
-bright-star terms) around its stars with S/N >= 50, each box's edge level subtracted and divided
-by the star's flux, is stacked; the chi2 of the stack's core against its star-to-star error is
-about 1 when the PSF is right (noise and neighbours average away; on synthetic fields 0.7-1.5
-even with many unmodelled faint stars) and 20 or more when it is 1 % too wide.  Above
-`detectorPsfMaxChi2` = 5 the tile refits PIFF on its own stars and gets a second pass; the pass
-whose stars fit better is kept.  Nothing depends on where a detector is crowded: the cost is a
-second pass only in the tiles where one PSF does not do.  With too few stars, or if PIFF fails,
-the tiles refit their PSF one by one as before.
+**Grid of local PSFs** (`detectorPsf`, whole-detector runs).  Refitting the PSF in every tile
+costs a second pass per tile.  Instead, about 25 tiles spread over the detector out to its edges
+and corners (`sampleTiles`, `detectorPsfTiles`: a grid from the first to the last tile centre)
+are fitted the full way first, in parallel: a pass, their own PIFF PSF, another pass; they are
+final.  Their PIFF models (before the wing extension) are interpolated to every other tile's
+centre (`gridPsfs`: inverse-distance-squared mean of the `detectorPsfNeighbours` = 4 nearest),
+and each other tile starts from that PSF.  After its first pass it checks it
+(`psfFitQuality`, `psfRefitMaxChi2`): the joint-fit residual (without the bright-star terms)
+around its stars with S/N >= 50, each box's edge level subtracted and divided by the star's flux,
+is stacked; the chi2 of the stack's core against its star-to-star error is about 1 when the PSF is
+right (noise and neighbours average away; on synthetic fields 0.7-1.5 even with many unmodelled
+faint stars) and 20 or more when it is 1 % too wide.  Above `detectorPsfMaxChi2` = 5 the tile
+refits PIFF on its own stars and runs a second pass from the first pass's sources, as the per-tile
+method does.  A single PIFF fit over the whole detector with a quadratic variation was tried
+first: on det 144 it took 83 s on one CPU and 51 of 121 tiles failed the check, so the PSF varies
+there on scales a quadratic cannot follow.  Nothing depends on where a detector is crowded: a tile
+pays for a second pass only where the local PSF does not do.
 
 Off by default (they did not help on the test data): a median-stack core correction
 (`psfCoreMedian`) and a brightness-dependent PSF (`bfTerm`).

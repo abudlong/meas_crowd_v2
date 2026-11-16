@@ -308,15 +308,13 @@ updated before every inner iteration and at the end (``skyMedian="mesh"``): the 
 background is over-subtracted around dense star groups.  On LSSTCam detector 144 the visit PSF is
 wrong in the corners; the PIFF refit took the bottom-right corner from 713 to 969 sources and the
 residual on the stars from -0.15 to -0.005 sigma, at about twice the time of one pass.  In a
-whole-detector run (``fitTiles``) the preset instead fits one PIFF PSF for the whole detector
-(``detectorPsf``): 25 tiles spread over it out to its edges and corners get one pass with the
-visit PSF, their clean stars (25 each, neighbours subtracted) go into one PIFF fit with a quadratic
-variation over the detector (``detectorPsfOrder``), and then every tile gets a single pass with
-that PSF.  Each tile then checks the PSF on its own bright stars (``psfFitQuality``: the chi2 of
-their stacked residual, about 1 when the PSF is right, crowded or not); a tile above
-``detectorPsfMaxChi2`` gets its own PIFF refit and a second pass, wherever it is.  The cost thus
-follows how well one PSF describes the detector.  If the detector PSF cannot be fitted, the tiles
-fall back to the per-tile refit.
+whole-detector run (``fitTiles``) the preset builds a grid of local PSFs (``detectorPsf``): 25
+tiles spread over the detector out to its edges and corners are fitted the full way (a pass, their
+own PIFF PSF, another pass), in parallel, and are final.  Every other tile starts from the
+inverse-distance mean of the nearest local PIFF models and checks it on its own bright stars
+(``psfFitQuality``: the chi2 of their stacked residual, about 1 when the PSF is right, crowded or
+not); only above ``detectorPsfMaxChi2`` does it refit its own PSF and run a second pass, starting
+from the first pass's sources.  The cost thus follows how much the PSF varies, wherever that is.
 ``fitTiles(..., nJobs=N)`` (``--n-jobs``) fits N tiles at once in worker processes.
 
 The per-source loops of the joint fit run in C++ (``src/jointFit.cc``: the design matrix, source

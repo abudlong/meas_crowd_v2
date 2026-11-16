@@ -2,7 +2,7 @@
 
 Every public function and class of `lsst.meas.crowd`: what it does, its parameters (with types and defaults) and what it returns.  Generated from the docstrings by `doc/make_function_reference.py`; do not edit by hand (run `python doc/make_function_reference.py` after changing a docstring).  How the pipeline fits together is in [pipeline_guide.md](pipeline_guide.md); the output catalogue in [catalog_columns.md](catalog_columns.md).
 
-194 functions and 5 classes in 13 modules.  Everything listed here can be used as `crowd.<name>` after `import lsst.meas.crowd as crowd`, or from its module (`from lsst.meas.crowd import photometry`).  Names starting with `_` are internal helpers and are not listed.
+193 functions and 5 classes in 13 modules.  Everything listed here can be used as `crowd.<name>` after `import lsst.meas.crowd as crowd`, or from its module (`from lsst.meas.crowd import photometry`).  Names starting with `_` are internal helpers and are not listed.
 
 ## Start here
 
@@ -28,7 +28,7 @@ Every public function and class of `lsst.meas.crowd`: what it does, its paramete
 
 | Module | Role | Public functions / classes |
 | --- | --- | --- |
-| [`pipeline`](#pipeline) | the driver: run the pipeline on cutouts from Gaia starting positions, inner / outer loops, PSF refinement, diagnostics | 45 |
+| [`pipeline`](#pipeline) | the driver: run the pipeline on cutouts from Gaia starting positions, inner / outer loops, PSF refinement, diagnostics | 44 |
 | [`session`](#session) | load a visit, cut out regions, set up the PSF; configuration; saving runs | 19 |
 | [`gaiaCatalog`](#gaiacatalog) | the Gaia catalogue and the starting positions of each cutout | 4 |
 | [`photometry`](#photometry) | PSF and aperture photometry, errors, the Gaia comparison | 9 |
@@ -75,7 +75,6 @@ Adaptive, iterative joint PSF-fitting pipeline starting from Gaia positions.
 | [`refitPsfPiff`](#pipelinerefitpsfpiff) | Refit the PSF with PIFF (the Rubin pipelines' PSF determiner) on neighbour-subtracted stars. |
 | [`fitPiff`](#pipelinefitpiff) | Fit a PIFF PSF to stars on a neighbour-subtracted image. |
 | [`psfFitQuality`](#pipelinepsffitquality) | How well a tile's PSF fits its bright stars: chi2 of their stacked residual. |
-| [`psfStarSample`](#pipelinepsfstarsample) | Clean PSF stars of a fitted tile, for a detector-level PSF fit. |
 | [`selectPsfStars`](#pipelineselectpsfstars) | Select clean, bright, isolated, unsaturated point sources for the PSF stack. |
 | [`refinePsfMedian`](#pipelinerefinepsfmedian) | Correct the PSF core with the median residual/flux of the bright clean stars. |
 | [`smoothPsfKernel`](#pipelinesmoothpsfkernel) | Return a hole-free, smooth version of a PSF kernel. |
@@ -590,25 +589,6 @@ The residual of the joint fit (without the bright-star correction terms, which w
 | Returns | Type | Description |
 | --- | --- | --- |
 | `quality` | `dict` | ``chi2`` (mean over the core pixels of (stack mean / its error)^2), ``nStars`` and ``peakFrac`` (largest core residual as a fraction of the PSF peak). |
-
-### pipeline.psfStarSample
-
-`psfStarSample(run, interior, P, verbose=False)`
-
-Clean PSF stars of a fitted tile, for a detector-level PSF fit.
-
-Picks up to ``psfStackN`` clean stars (`selectPsfStars`) inside ``interior`` and returns the tile's neighbour-subtracted image over the interior (`psfStarImage`: only those stars' light left on top of the residual) with their positions and peak values.
-
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `run` | `lsst.meas.crowd.session.CutoutRun` | A fitted tile (its last pass is used). |
-| `interior` | `lsst.geom.Box2I` | The tile's interior (parent px). |
-| `P` | `dict` | Pipeline options. |
-| `verbose` | `bool`, optional | Print the star selection. |
-
-| Returns | Type | Description |
-| --- | --- | --- |
-| `sample` | `dict` | ``x0``, ``y0`` (parent px of ``image[0, 0]``), ``image`` (float32), ``xy`` (N, 2) and ``peaks`` (N,). |
 
 ### pipeline.selectPsfStars
 
@@ -2108,7 +2088,7 @@ Whole-detector runs: tile, fit, stitch.
 | [`availableCpus`](#detectoravailablecpus) | Return the number of CPUs this process may actually use. |
 | [`limitBlasThreads`](#detectorlimitblasthreads) | Cap the threads of NumPy's BLAS / OpenMP libraries in this process (default: the usable CPUs). |
 | [`sampleTiles`](#detectorsampletiles) | Pick about ``n`` tiles spread evenly over the detector, edges and corners included. |
-| [`fitDetectorPsf`](#detectorfitdetectorpsf) | Fit one PIFF PSF for the whole detector from a sample of tiles. |
+| [`gridPsfs`](#detectorgridpsfs) | Interpolate local PSF models to tiles: inverse-distance-squared mean of the nearest ones. |
 | [`stitchTiles`](#detectorstitchtiles) | Assemble the tile files into full-detector images and one catalogue. |
 | [`loadMosaic`](#detectorloadmosaic) | Read the files written by `stitchTiles`. |
 | [`loadTile`](#detectorloadtile) | Read one tile file written by `saveTileProducts`. |
@@ -2268,29 +2248,21 @@ The tile nearest each point of a square grid that runs from the first to the las
 | --- | --- | --- |
 | `picks` | `list` [`tuple`] | The chosen specs (no repeats; all of them when there are at most ``n``). |
 
-### detector.fitDetectorPsf
+### detector.gridPsfs
 
-`fitDetectorPsf(sess, visitImage, specs, cfg, kw, P, nJobs=1, outDir=None, verbose=True)`
+`gridPsfs(kernels, interiors, nNeighbours=4)`
 
-Fit one PIFF PSF for the whole detector from a sample of tiles.
-
-About ``detectorPsfTiles`` tiles spread over the detector (`sampleTiles`) are fitted in one pass with the session's PSF (no PSF refit); from each, up to ``detectorPsfStarsPerTile`` clean stars are taken with every other source subtracted (`lsst.meas.crowd.pipeline.psfStarSample`). Their images are pasted into a copy of the visit image, and PIFF is fitted to all of them at once with a ``detectorPsfOrder`` polynomial variation over the detector (`lsst.meas.crowd.pipeline.fitPiff`).
+Interpolate local PSF models to tiles: inverse-distance-squared mean of the nearest ones.
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `sess` | `lsst.meas.crowd.session.Session` | The session; its jobs must include the sampled tiles. |
-| `visitImage` | `lsst.afw.image.Exposure` | The visit image. |
-| `specs` | `list` [`tuple`] | Tile specs to sample from. |
-| `cfg` | `dict` | Pipeline configuration. |
-| `kw` | `dict` | Overrides passed to ``runSessionGaia``. |
-| `P` | `dict` | Pipeline options (`lsst.meas.crowd.pipeline._params`). |
-| `nJobs` | `int`, optional | Parallel worker processes. |
-| `outDir` | `str`, optional | Where the sample logs (``logs/psfsample_<tile>.log``) and the PSF (``detector_psf.fits``) go. |
-| `verbose` | `bool`, optional | Print progress. |
+| `kernels` | `list` [`tuple`] | (x, y, kernel) of every local model: the tile centre [px] and its PSF image there. |
+| `interiors` | `dict` [`str`, `lsst.geom.Box2I`] | Tile name -> interior; each gets the PSF at its centre. |
+| `nNeighbours` | `int`, optional | Local models averaged per tile. |
 
 | Returns | Type | Description |
 | --- | --- | --- |
-| `psf` | `lsst.afw.detection.Psf` or `None` | The detector PSF; None if the fit failed (the tiles then refit their PSF one by one). |
+| `psfs` | `dict` [`str`, `lsst.afw.detection.Psf`] | Tile name -> spatially constant PSF (unit sum). |
 
 ### detector.stitchTiles
 

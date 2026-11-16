@@ -200,15 +200,16 @@ PIPELINE_DEFAULTS = dict(
     piffSpatialOrder=0,       # refitPsf="piff": polynomial order of PIFF's variation over a cutout
                               #   (0 = constant: as good on LSSTCam det 144 and half the time)
     piffMinStars=10,          # refitPsf="piff": fewer clean stars -> the pass's PSF is kept
-    detectorPsf=False,        # fitTiles: fit one PIFF PSF for the whole detector from a sample of
-                              #   tiles (one pass each), then fit every tile in one pass with it
-                              #   (no per-tile PSF refit)
+    detectorPsf=False,        # fitTiles: a grid of local PSFs -- sampled tiles get their own PIFF
+                              #   PSF (two passes), every other tile starts from their
+                              #   interpolation and refits its own only if that does not fit
     detectorPsfTiles=25,      # detectorPsf: tiles sampled (a grid over the detector, edges included)
-    detectorPsfStarsPerTile=25,   # detectorPsf: clean PSF stars taken from each sampled tile
-    detectorPsfOrder=2,       # detectorPsf: polynomial order of the PSF's variation over the detector
+    detectorPsfNeighbours=4,  # detectorPsf: local PSFs averaged (1/d^2) for each other tile
     detectorPsfMaxChi2=5.0,   # detectorPsf: a tile whose bright stars' stacked residual has a core
                               #   chi2 above this (psfFitQuality; ~1 = PSF right) gets its own PIFF
                               #   refit and a second pass
+    psfRefitMaxChi2=0.0,      # > 0: refit the PSF after a pass only if its bright stars' chi2
+                              #   (psfFitQuality) is above this; otherwise stop (0 = always refit)
     bgMode="plane",           # background refit between passes: "plane" (tilted plane, sigma-clipped),
                                #   "constant", "spline" (SubtractBackgroundTask surface on bgBinSize
                                #   bins -- can swing by 100s of counts in the corners of a small,
@@ -3569,54 +3570,6 @@ def psfFitQuality(run, minSnr=50.0, half=8, core=4.0, minStars=8, interior=None)
                 peakFrac=float(np.abs(mean[inCore]).max() / psfPeak))
 
 
-def psfStarSample(run, interior, P, verbose=False):
-    """Clean PSF stars of a fitted tile, for a detector-level PSF fit.
-
-    Picks up to ``psfStackN`` clean stars (`selectPsfStars`) inside ``interior`` and returns the
-    tile's neighbour-subtracted image over the interior (`psfStarImage`: only those stars' light
-    left on top of the residual) with their positions and peak values.
-
-    Parameters
-    ----------
-    run : `lsst.meas.crowd.session.CutoutRun`
-        A fitted tile (its last pass is used).
-    interior : `lsst.geom.Box2I`
-        The tile's interior (parent px).
-    P : `dict`
-        Pipeline options.
-    verbose : `bool`, optional
-        Print the star selection.
-
-    Returns
-    -------
-    sample : `dict`
-        ``x0``, ``y0`` (parent px of ``image[0, 0]``), ``image`` (float32), ``xy`` (N, 2) and
-        ``peaks`` (N,).
-    """
-    h = run.outerHistory[-1]
-    exposure, res, psf = h["exposure"], h["result"], h["psf"]
-    fit = res["snaps"][-1]["fit"]
-    point = interior.getCenter() if hasattr(interior, "getCenter") else exposure.getBBox().getCenter()
-    fwhm = L._fwhm(psf, point)
-    k = psf.computeKernelImage(point).array
-    psfPeak = float(k.max() / k.sum())
-    noise = float(np.sqrt(np.nanmedian(exposure.variance.array)))
-    idx = np.asarray(selectPsfStars(exposure, res, fwhm, psfPeak, noise, P, verbose=verbose), int)
-    xyAll = np.asarray(res["S"]["xy"], float)
-    ix0, iy0 = interior.getMinX(), interior.getMinY()
-    ix1, iy1 = interior.getMaxX(), interior.getMaxY()
-    if len(idx):
-        inside = ((xyAll[idx, 0] >= ix0) & (xyAll[idx, 0] <= ix1)
-                  & (xyAll[idx, 1] >= iy0) & (xyAll[idx, 1] <= iy1))
-        idx = idx[inside]
-    img = psfStarImage(exposure, fit, idx)
-    eb = exposure.getBBox()
-    sub = img[iy0 - eb.getMinY():iy1 - eb.getMinY() + 1, ix0 - eb.getMinX():ix1 - eb.getMinX() + 1]
-    amps = np.asarray(fit["amps"], float)
-    return dict(x0=int(ix0), y0=int(iy0), image=np.asarray(sub, np.float32),
-                xy=xyAll[idx].copy(), peaks=amps[idx] * psfPeak)
-
-
 def _piffWhy(task, cfg, exposure, cands, PropertyList, maxLines=40):
     """Rerun a failed PIFF fit with PIFF's own logging on and print what it says about the stars.
 
@@ -4850,6 +4803,18 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
         if not res["snaps"]:
             print("no sources -- stopping")
             break
+        if P["psfRefitMaxChi2"] and P["refitPsf"]:
+            # refit the PSF only if this pass's PSF does not fit the bright stars
+            import types
+            q = psfFitQuality(types.SimpleNamespace(outerHistory=[hist[-1]], badBitmask=badBitmask))
+            hist[-1]["psfChi2"] = q["chi2"]
+            thr = float(P["psfRefitMaxChi2"])
+            if not np.isfinite(q["chi2"]) or q["chi2"] <= thr:
+                print(f"PSF check: bright-star chi2 {q['chi2']:.2f} from {q['nStars']} stars "
+                      f"(<= {thr:g} or too few stars) -> no PSF refit, done")
+                break
+            print(f"PSF check: bright-star chi2 {q['chi2']:.2f} from {q['nStars']} stars > {thr:g} "
+                  f"-> PSF refit and another pass")
 
         # ---- refit background + PSF from this pass's model ---------------------
         expN = raw.clone()
@@ -4877,6 +4842,7 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
             with L.TIMER.step("PSF refit (PIFF)", outer=k):
                 try:
                     psfNew = refitPsfPiff(expW, psfW, res, P, c)
+                    hist[-1]["psfRefitRaw"] = psfNew      # PIFF's own model, before the wings
                 except Exception as e:
                     print(f"  PIFF PSF refit failed ({type(e).__name__}: {e}) -- keeping the "
                           f"pass's PSF")

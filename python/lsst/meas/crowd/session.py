@@ -148,10 +148,10 @@ FAST_STELLAR_FIELD_CONFIG = dict(
                                  #   bias a median high, most in the densest, most over-subtracted parts)
     skyMeshSmooth=1,             # no median filter over cells: it flattened the dips
     skyRounds=2,                 # sky, flux refit, sky: the fit first absorbs a dip into the fluxes
-    detectorPsf=True,            # whole-detector runs (fitTiles): one PIFF PSF for the detector from
-                                 #   25 tiles sampled out to its edges, then one pass per tile; a tile
-                                 #   whose bright stars it does not fit gets its own PIFF refit and
-                                 #   a second pass (cutout runs ignore it)
+    detectorPsf=True,            # whole-detector runs (fitTiles): 25 tiles sampled out to the edges
+                                 #   get their own PIFF PSF; every other tile starts from their
+                                 #   interpolation and refits its own only where that does not fit
+                                 #   its bright stars (cutout runs ignore it)
 )
 
 
@@ -509,6 +509,8 @@ def prepareSession(visit, detector, cutouts, pad=0, psfSource="refit",
     badBitmask = (mk.getPlaneBitMask("SAT") | mk.getPlaneBitMask("CR") |
                    mk.getPlaneBitMask("BAD") | mk.getPlaneBitMask("INTRP") |
                    mk.getPlaneBitMask("EDGE"))
+    if "SPIKE" in mk.getMaskPlaneDict():         # diffraction spikes of bright stars: not
+        badBitmask |= mk.getPlaneBitMask("SPIKE")   # point sources, fitted as stars otherwise
 
     G = L.geom
     jobs = {}
