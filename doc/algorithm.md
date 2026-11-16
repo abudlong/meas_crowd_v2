@@ -339,6 +339,14 @@ the residual-stack refit used before (bottom-right scatter 1.12 vs 1.30), which 
 
 With fewer than `piffMinStars` = 10 clean stars, or if PIFF fails, the pass's PSF is kept.
 
+**Bleed-trail wings** (`trailWingPx`).  Saturated stars' bleed trails are masked (SAT, and INTRP
+where the processing interpolated over them), but charge also spreads into the columns beside the
+mask; fitted as stars or halo, it leaves dark-and-light streaks along the trail.  Every long, thin
+masked region is treated as a trail: beside it, the median of the data along the trail at 1, 2, ...
+px from its edge is compared with a reference band further out, and the trail is widened by the
+offsets that are significantly brighter (up to 10 px per side; stars on the trail hardly move the
+medians).  Round saturated cores are left to `satGrowPx`.
+
 **Grid of local PSFs** (`detectorPsf`, whole-detector runs).  Refitting the PSF in every tile
 costs a second pass per tile.  Instead, about 25 tiles spread over the detector out to its edges
 and corners (`sampleTiles`, `detectorPsfTiles`: a grid from the first to the last tile centre)

@@ -2,7 +2,7 @@
 
 Every public function and class of `lsst.meas.crowd`: what it does, its parameters (with types and defaults) and what it returns.  Generated from the docstrings by `doc/make_function_reference.py`; do not edit by hand (run `python doc/make_function_reference.py` after changing a docstring).  How the pipeline fits together is in [pipeline_guide.md](pipeline_guide.md); the output catalogue in [catalog_columns.md](catalog_columns.md).
 
-193 functions and 5 classes in 13 modules.  Everything listed here can be used as `crowd.<name>` after `import lsst.meas.crowd as crowd`, or from its module (`from lsst.meas.crowd import photometry`).  Names starting with `_` are internal helpers and are not listed.
+194 functions and 5 classes in 13 modules.  Everything listed here can be used as `crowd.<name>` after `import lsst.meas.crowd as crowd`, or from its module (`from lsst.meas.crowd import photometry`).  Names starting with `_` are internal helpers and are not listed.
 
 ## Start here
 
@@ -28,7 +28,7 @@ Every public function and class of `lsst.meas.crowd`: what it does, its paramete
 
 | Module | Role | Public functions / classes |
 | --- | --- | --- |
-| [`pipeline`](#pipeline) | the driver: run the pipeline on cutouts from Gaia starting positions, inner / outer loops, PSF refinement, diagnostics | 44 |
+| [`pipeline`](#pipeline) | the driver: run the pipeline on cutouts from Gaia starting positions, inner / outer loops, PSF refinement, diagnostics | 45 |
 | [`session`](#session) | load a visit, cut out regions, set up the PSF; configuration; saving runs | 19 |
 | [`gaiaCatalog`](#gaiacatalog) | the Gaia catalogue and the starting positions of each cutout | 4 |
 | [`photometry`](#photometry) | PSF and aperture photometry, errors, the Gaia comparison | 9 |
@@ -59,6 +59,7 @@ Adaptive, iterative joint PSF-fitting pipeline starting from Gaia positions.
 | [`enableSpeedups`](#pipelineenablespeedups) | Patch fitLib with the cached / fast PSF stamps, fast S/N and fast NNLS (idempotent). |
 | [`disableSpeedups`](#pipelinedisablespeedups) | Undo `enableSpeedups` and empty the caches. |
 | [`estimateGaiaOffset`](#pipelineestimategaiaoffset) | Measure the global offset between the image and the Gaia positions. |
+| [`trailWingMask`](#pipelinetrailwingmask) | Pixels beside masked bleed trails that still carry trail light (data-driven). |
 | [`saturationLevel`](#pipelinesaturationlevel) | Estimate the saturation level of an image. |
 | [`measureModelError`](#pipelinemeasuremodelerror) | Measure the PSF model error as a fraction of the model per pixel. |
 | [`satZones`](#pipelinesatzones) | Find the zones around saturated stars. |
@@ -229,6 +230,28 @@ The median (data centroid - Gaia position) of bright, unsaturated, fairly isolat
 | --- | --- | --- |
 | `dx, dy` | `float` | Offset (data - Gaia) [px]; 0 if too few stars. |
 | `nUsed` | `int` | Number of stars used. |
+
+### pipeline.trailWingMask
+
+`trailWingMask(image, mask, trailBits, maxGrow=10, minLen=30, nSigma=3.0)`
+
+Pixels beside masked bleed trails that still carry trail light (data-driven).
+
+Every masked region (``trailBits``) at least ``minLen`` px long and three times longer than wide is a trail, along its columns or its rows.  Beside it, at 1, 2, ... ``maxGrow`` px from its edge in every line, the median of the data along the trail is compared with the median of a reference band further out (``maxGrow`` + 3 .. + 8 px); the trail is widened, on each side, by the offsets that are in a row significantly brighter than the reference (stars on the trail hardly move the medians).
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `image` | `numpy.ndarray` | Data. |
+| `mask` | `numpy.ndarray` [`int`] | Mask bits. |
+| `trailBits` | `int` | Bits of the trail pixels (e.g. SAT \| INTRP). |
+| `maxGrow` | `int`, optional | Largest widening per side [px]. |
+| `minLen` | `int`, optional | Shortest region counted as a trail [px]. |
+| `nSigma` | `float`, optional | Significance of an elevated offset. |
+
+| Returns | Type | Description |
+| --- | --- | --- |
+| `wing` | `numpy.ndarray` [`bool`] | Pixels to mask in addition. |
+| `info` | `list` [`tuple`] | Per widened trail: (x0, x1, y0, y1, grown px on the low side, on the high side). |
 
 ### pipeline.saturationLevel
 

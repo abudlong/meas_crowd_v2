@@ -598,6 +598,49 @@ class StellarConfigTestCase(unittest.TestCase):
         self.assertTrue(P["detectorPsf"])                  # fitTiles: one PSF for the detector
 
 
+class TrailWingMaskTestCase(unittest.TestCase):
+    """`pipeline.trailWingMask`: bleed-trail light beside the masked trail, from the data."""
+
+    def _scene(self, wings=True, horizontal=False):
+        rng = np.random.default_rng(0)
+        ny, nx = 400, 300
+        img = rng.normal(0, 20, (ny, nx))
+        yy, xx = np.mgrid[:ny, :nx]
+        for x, y, f in zip(rng.uniform(0, nx, 300), rng.uniform(0, ny, 300),
+                           10 ** rng.uniform(3, 4.5, 300)):            # stars, some on the trail
+            img += f * np.exp(-((xx - x) ** 2 + (yy - y) ** 2) / 12.5) / (2 * np.pi * 6.25)
+        mask = np.zeros((ny, nx), int)
+        mask[50:330, 140:144] = 1                                     # the trail
+        img[50:330, 140:144] = 5e4
+        if wings:
+            for d, a in ((1, 300), (2, 150), (3, 60)):
+                img[50:330, 140 - d] += a
+            for d, a in ((1, 250), (2, 80)):
+                img[50:330, 143 + d] += a
+        mask[200:212, 40:52] = 1                                      # a saturated core
+        img[200:212, 40:52] = 5e4
+        if horizontal:
+            return img.T.copy(), mask.T.copy()
+        return img, mask
+
+    def testWidensWhereTheDataIsElevated(self):
+        for horizontal in (False, True):
+            img, mask = self._scene(horizontal=horizontal)
+            wing, info = pl.trailWingMask(img, mask, 1)
+            line = wing[:, 100] if horizontal else wing[100]
+            np.testing.assert_array_equal(np.flatnonzero(line), [137, 138, 139, 144, 145])
+            self.assertEqual(len(info), 1)
+            self.assertEqual(info[0][4:], (3, 2))
+            self.assertFalse(wing[195:217, 35:57].any() if not horizontal
+                             else wing[35:57, 195:217].any())               # not round cores
+
+    def testNothingWithoutWings(self):
+        img, mask = self._scene(wings=False)
+        wing, info = pl.trailWingMask(img, mask, 1)
+        self.assertEqual(int(wing.sum()), 0)
+        self.assertEqual(info, [])
+
+
 class NearBrightFakesTestCase(unittest.TestCase):
     """`pipeline._nearBrightFakes`: faint non-Gaia sources around bright stars after a light pass."""
 

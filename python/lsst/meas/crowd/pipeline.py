@@ -84,6 +84,9 @@ PIPELINE_DEFAULTS = dict(
     subtractInitialBg=True,  # subtract session.bgImage in pass 1
     keepAllFits=False,       # keep full fits (all PSF stamps) in every snapshot
     # ---- saturated / bright stars
+    trailWingPx=10,          # widen masked bleed trails (SAT | INTRP, long and thin) by up to this
+                              #   many px per side where the data beside them is still elevated
+                              #   (trailWingMask; 0 = off)
     satGrowPx=2,             # also exclude pixels within this many px of SAT (non-linear,
                                # charge spill); 0 = off
     brightCorr=True,          # per-bright-star shift + width + flux correction terms
@@ -1612,6 +1615,96 @@ def _satlike(exposure):
     except Exception:
         pass
     return out
+
+
+def trailWingMask(image, mask, trailBits, maxGrow=10, minLen=30, nSigma=3.0):
+    """Pixels beside masked bleed trails that still carry trail light (data-driven).
+
+    Every masked region (``trailBits``) at least ``minLen`` px long and three times longer than
+    wide is a trail, along its columns or its rows.  Beside it, at 1, 2, ... ``maxGrow`` px from
+    its edge in every line, the median of the data along the trail is compared with the median of
+    a reference band further out (``maxGrow`` + 3 .. + 8 px); the trail is widened, on each side,
+    by the offsets that are in a row significantly brighter than the reference (stars on the
+    trail hardly move the medians).
+
+    Parameters
+    ----------
+    image : `numpy.ndarray`
+        Data.
+    mask : `numpy.ndarray` [`int`]
+        Mask bits.
+    trailBits : `int`
+        Bits of the trail pixels (e.g. SAT | INTRP).
+    maxGrow : `int`, optional
+        Largest widening per side [px].
+    minLen : `int`, optional
+        Shortest region counted as a trail [px].
+    nSigma : `float`, optional
+        Significance of an elevated offset.
+
+    Returns
+    -------
+    wing : `numpy.ndarray` [`bool`]
+        Pixels to mask in addition.
+    info : `list` [`tuple`]
+        Per widened trail: (x0, x1, y0, y1, grown px on the low side, on the high side).
+    """
+    from scipy.ndimage import find_objects, label
+    trail = (np.asarray(mask) & trailBits) != 0
+    wing = np.zeros(trail.shape, bool)
+    info = []
+    if not trail.any():
+        return wing, info
+    lab, n = label(trail)
+    img = np.asarray(image, float)
+    for k, sl in enumerate(find_objects(lab)):
+        if sl is None:
+            continue
+        h, w = sl[0].stop - sl[0].start, sl[1].stop - sl[1].start
+        if h >= minLen and h >= 3 * w:
+            vertical = True
+        elif w >= minLen and w >= 3 * h:
+            vertical = False
+        else:
+            continue
+        L_ = lab if vertical else lab.T
+        I_ = img if vertical else img.T
+        W_ = wing if vertical else wing.T
+        rows = range(sl[0].start, sl[0].stop) if vertical else range(sl[1].start, sl[1].stop)
+        lo, hi = [], []
+        for r in rows:
+            c = np.flatnonzero(L_[r] == k + 1)
+            if len(c):
+                lo.append((r, c.min()))
+                hi.append((r, c.max()))
+        grown = []
+        ncol = I_.shape[1]
+        for edges, sgn in ((lo, -1), (hi, +1)):
+            def band(d):
+                v = [I_[r, e + sgn * d] for r, e in edges if 0 <= e + sgn * d < ncol]
+                return np.asarray(v, float)
+            ref = np.concatenate([band(d) for d in range(maxGrow + 3, maxGrow + 9)])
+            ref = ref[np.isfinite(ref)]
+            if len(ref) < 20:
+                grown.append(0)
+                continue
+            med = np.median(ref)
+            sig = 1.4826 * np.median(np.abs(ref - med))
+            g = 0
+            for d in range(1, maxGrow + 1):
+                v = band(d)
+                v = v[np.isfinite(v)]
+                if len(v) < 10 or not (np.median(v) - med > nSigma * 1.25 * sig / np.sqrt(len(v))):
+                    break
+                g = d
+            for r, e in edges:
+                for d in range(1, g + 1):
+                    if 0 <= e + sgn * d < ncol:
+                        W_[r, e + sgn * d] = True
+            grown.append(g)
+        if any(grown):
+            info.append((sl[1].start, sl[1].stop - 1, sl[0].start, sl[0].stop - 1, *grown))
+    return wing & ~trail, info
 
 
 def saturationLevel(exposure, P):
@@ -4631,6 +4724,25 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
     cutout.setPsf(psf)
     cb = cutout.getBBox()
     c = cb.getCenter()
+    if P["trailWingPx"]:
+        tb = 0
+        for nm in ("SAT", "INTRP"):
+            try:
+                tb |= cutout.mask.getPlaneBitMask(nm)
+            except Exception:
+                pass
+        if tb:
+            wing, tinfo = trailWingMask(cutout.image.array, cutout.mask.array, tb,
+                                        maxGrow=int(P["trailWingPx"]))
+            if wing.any():
+                cutout.mask.addMaskPlane("TRAIL_WING")
+                bit = cutout.mask.getPlaneBitMask("TRAIL_WING")
+                cutout.mask.array[wing] |= bit
+                badBitmask = badBitmask | bit
+                print(f"bleed trails: {len(tinfo)} widened where the data beside them is still "
+                      f"elevated ({int(wing.sum())} px masked): "
+                      + ", ".join(f"x {a}-{b} y {c}-{d} +{g0}/+{g1} px"
+                                  for a, b, c, d, g0, g1 in tinfo[:6]))
     if P["satGrowPx"]:
         from scipy.ndimage import binary_dilation
         sat = (cutout.mask.array & cutout.mask.getPlaneBitMask("SAT")) != 0
