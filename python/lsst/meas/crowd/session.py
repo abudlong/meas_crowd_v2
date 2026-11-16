@@ -149,7 +149,9 @@ FAST_STELLAR_FIELD_CONFIG = dict(
     skyMeshSmooth=1,             # no median filter over cells: it flattened the dips
     skyRounds=2,                 # sky, flux refit, sky: the fit first absorbs a dip into the fluxes
     detectorPsf=True,            # whole-detector runs (fitTiles): one PIFF PSF for the detector from
-                                 #   16 sampled tiles, then one pass per tile (cutout runs ignore it)
+                                 #   25 tiles sampled out to its edges, then one pass per tile; a tile
+                                 #   whose bright stars it does not fit gets its own PIFF refit and
+                                 #   a second pass (cutout runs ignore it)
 )
 
 

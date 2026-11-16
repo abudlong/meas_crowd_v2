@@ -203,9 +203,12 @@ PIPELINE_DEFAULTS = dict(
     detectorPsf=False,        # fitTiles: fit one PIFF PSF for the whole detector from a sample of
                               #   tiles (one pass each), then fit every tile in one pass with it
                               #   (no per-tile PSF refit)
-    detectorPsfTiles=16,      # detectorPsf: tiles sampled (a grid over the detector)
+    detectorPsfTiles=25,      # detectorPsf: tiles sampled (a grid over the detector, edges included)
     detectorPsfStarsPerTile=25,   # detectorPsf: clean PSF stars taken from each sampled tile
     detectorPsfOrder=2,       # detectorPsf: polynomial order of the PSF's variation over the detector
+    detectorPsfMaxChi2=5.0,   # detectorPsf: a tile whose bright stars' stacked residual has a core
+                              #   chi2 above this (psfFitQuality; ~1 = PSF right) gets its own PIFF
+                              #   refit and a second pass
     bgMode="plane",           # background refit between passes: "plane" (tilted plane, sigma-clipped),
                                #   "constant", "spline" (SubtractBackgroundTask surface on bgBinSize
                                #   bins -- can swing by 100s of counts in the corners of a small,
@@ -3487,6 +3490,83 @@ def fitPiff(clean, xy, peaks, P, spatialOrder=None, verbose=True):
         raise
     psfNew = out[0] if isinstance(out, tuple) else out
     return psfNew, len(cands), cfg, model, stamp
+
+
+def psfFitQuality(run, minSnr=50.0, half=8, core=4.0, minStars=8, interior=None):
+    """How well a tile's PSF fits its bright stars: chi2 of their stacked residual.
+
+    The residual of the joint fit (without the bright-star correction terms, which would absorb a
+    PSF error) is cut out around every star with peak S/N >= ``minSnr`` whose box has no bad pixel,
+    divided by the star's flux and stacked.  Each pixel's mean is compared with its star-to-star
+    scatter / sqrt(N): noise and neighbours (crowding) average away and give a chi2 per core pixel
+    of about 1, a PSF error is the same in every star and gives much more.  Each box's level (the
+    median of its edge ring) is subtracted first, so the light of unmodelled faint stars under all
+    of them does not count as a PSF error.
+
+    Parameters
+    ----------
+    run : `lsst.meas.crowd.session.CutoutRun`
+        A fitted tile (its last pass is used).
+    minSnr : `float`, optional
+        Stars with at least this peak S/N are used.
+    half : `int`, optional
+        Half-size of the stacked boxes [px].
+    core : `float`, optional
+        Radius [px] within which the chi2 is averaged.
+    minStars : `int`, optional
+        Fewer usable stars: chi2 is NaN (cannot judge).
+    interior : `lsst.geom.Box2I`, optional
+        Only stars inside it.
+
+    Returns
+    -------
+    quality : `dict`
+        ``chi2`` (mean over the core pixels of (stack mean / its error)^2), ``nStars`` and
+        ``peakFrac`` (largest core residual as a fraction of the PSF peak).
+    """
+    h = run.outerHistory[-1]
+    exposure, res, psf = h["exposure"], h["result"], h["psf"]
+    fit = res["snaps"][-1]["fit"]
+    data = np.asarray(exposure.image.array, float)
+    var = np.asarray(exposure.variance.array, float)
+    bad = ~np.isfinite(data) | ~(var > 0) | ((exposure.mask.array & run.badBitmask) != 0)
+    resid = data - np.asarray(fit["modelFull"], float)
+    eb = exposure.getBBox()
+    X0, Y0 = eb.getMinX(), eb.getMinY()
+    point = eb.getCenter()
+    k = psf.computeKernelImage(point).array
+    psfPeak = float(k.max() / k.sum())
+    noise = float(np.sqrt(np.nanmedian(var)))
+    amps = np.asarray(fit["amps"], float)
+    xy = np.asarray(res["S"]["xy"], float)
+    snr = amps * psfPeak / noise
+    ny, nx = data.shape
+    yy, xx = np.mgrid[-half:half + 1, -half:half + 1]
+    rr = np.hypot(xx, yy)
+    outer = rr > half - 1.5                      # each box's edge ring: its local level
+    stamps = []
+    for j in np.flatnonzero(snr >= minSnr):
+        x, y = xy[j]
+        if interior is not None and not (interior.getMinX() <= x <= interior.getMaxX()
+                                         and interior.getMinY() <= y <= interior.getMaxY()):
+            continue
+        ix, iy = int(round(x)) - X0, int(round(y)) - Y0
+        if ix - half < 0 or iy - half < 0 or ix + half >= nx or iy + half >= ny:
+            continue
+        sl = (slice(iy - half, iy + half + 1), slice(ix - half, ix + half + 1))
+        if bad[sl].any():
+            continue
+        r = resid[sl]
+        stamps.append((r - np.median(r[outer])) / amps[j])   # unmodelled faint light: a pedestal
+    n = len(stamps)
+    if n < max(minStars, 2):
+        return dict(chi2=float("nan"), nStars=n, peakFrac=float("nan"))
+    st = np.array(stamps)
+    mean = st.mean(axis=0)
+    err = st.std(axis=0, ddof=1) / np.sqrt(n)
+    inCore = (rr <= core) & (err > 0)
+    return dict(chi2=float(np.mean((mean[inCore] / err[inCore]) ** 2)), nStars=n,
+                peakFrac=float(np.abs(mean[inCore]).max() / psfPeak))
 
 
 def psfStarSample(run, interior, P, verbose=False):

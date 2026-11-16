@@ -77,7 +77,7 @@ class _Synthetic:
         self.var = 100 + truth
         self.data = truth + rng.normal(0, 1, shape) * np.sqrt(self.var)
         self.psf = lsstStubs.FakePsf(lsstStubs.gaussianKernel(sigma, half))
-        self.calls, self.kws = [], []
+        self.calls, self.kws, self.psfs = [], [], []
         bb = geom.Box2I(geom.Point2I(0, 0), geom.Point2I(shape[1] - 1, shape[0] - 1))
         self.visitImage = types.SimpleNamespace(getBBox=lambda: bb)
 
@@ -114,6 +114,7 @@ class _Synthetic:
         res = dict(S=S, snaps=[dict(fit=fit)], modelFull=model, amps=fl.copy(), brightCorr={},
                    peaks=[tuple(p) for p in xy])
         self.kws.append(kw)
+        self.psfs.append(getattr(sess, "psf", None))
         run = types.SimpleNamespace(name=name, outerHistory=[dict(exposure=exp, result=res,
                                                                   psf=self.psf)],
                                     badBitmask=4, interiorBbox=job["interior"], config={})
@@ -145,6 +146,9 @@ class SampleTilesTestCase(unittest.TestCase):
             self.assertGreater(c.max(), 0.75 * n)
         few = specs[:5]
         self.assertEqual(det.sampleTiles(few, 16, 4096, 4004), few)
+        names = {det.tileName(s) for s in det.sampleTiles(specs, 25, 4096, 4004)}
+        for corner in ("x0000_y0000", "x3724_y0000", "x0000_y3640", "x3724_y3640"):
+            self.assertIn(corner, {nm[:11] for nm in names})     # the edges are sampled
 
 
 class DetectorPsfTestCase(unittest.TestCase):
@@ -221,6 +225,29 @@ class DetectorPsfTestCase(unittest.TestCase):
         expect = (self.syn.data - self.syn.truth + stars)[sl]
         np.testing.assert_allclose(self.got["clean"][sl], expect, atol=1e-3 * stars.max())
         self.assertTrue(os.path.exists(os.path.join(self.tmp.name, "logs")))
+
+    def testTileWithABadPsfGetsItsOwnRefit(self):
+        """A tile whose bright stars the detector PSF does not fit is refitted; the others not."""
+        tilePsf = lsstStubs.FakePsf(lsstStubs.gaussianKernel(2.2, 12))
+        bad = "x0200_y0167_200x166"
+        seen = {}
+
+        def quality(run, interior=None, **k):
+            seen[run.name] = seen.get(run.name, 0) + 1
+            return dict(chi2=40.0 if run.name == bad and seen[run.name] == 1 else 1.0, nStars=30,
+                        peakFrac=0.01)
+
+        with mock.patch.object(pipeline, "psfFitQuality", quality), \
+                mock.patch.object(pipeline, "refitPsfPiff", lambda *a, **k: tilePsf):
+            self._fit()
+        final = self.syn.calls[4:]
+        self.assertEqual(final.count(bad), 2)                  # checked, refitted, fitted again
+        self.assertEqual(len(final), 9 + 1)
+        i = len(self.syn.calls) - 1 - self.syn.calls[::-1].index(bad)
+        self.assertIs(self.syn.psfs[i], tilePsf)               # the second pass: its own PSF
+        self.assertEqual(self.syn.kws[i]["maxOuter"], 1)
+        others = [p for c, p in zip(self.syn.calls[4:], self.syn.psfs[4:]) if c != bad]
+        self.assertTrue(all(p is self.newPsf for p in others))
 
     def testPiffFailureKeepsThePerTileRefit(self):
         self.piffFails = True

@@ -4,7 +4,7 @@ Every unit test in `tests/`: what it checks, what it feeds in, and what it must 
 pass.  How to run them and read the results is in the
 [pipeline guide](pipeline_guide.md#unit-tests-running-them-and-checking-the-results).
 
-The suite has **162 tests in 15 files**.  Without the Rubin stack 160 run and the 2 in
+The suite has **166 tests in 15 files**.  Without the Rubin stack 164 run and the 2 in
 `test_fastStampsStack.py` are skipped; `testCxxEqualsNumpy` is also skipped if the C++ extension
 was not built, and the `test_sparseSolver.py` solver tests if it was built without the
 sparse solver.  `test_docstrings.py` checks that this page lists every test and that the
@@ -129,6 +129,9 @@ what it is given.
 | `PiffFailureReportTestCase.test` | What PIFF saw when it fails | 10 stars, half the image masked BAD | star count, the BAD plane, PIFF's ignored planes and model size printed |
 | `PiffFailureReportTestCase.testPiffWhyCollectsLogging` | `_piffWhy` shows PIFF's own reasons | a stand-in task that logs and fails | distinct log lines printed, PIFF logging level raised to the highest the config accepts |
 | `PiffFailureReportTestCase.testNeverRaises` | The report never hides PIFF's error | no exposure | a one-line note instead of an exception |
+| `PsfFitQualityTestCase.testRightPsf` | `psfFitQuality` with the right PSF | 160 stars, with and without 1200 unmodelled faint stars | chi2 < 2 |
+| `PsfFitQualityTestCase.testWrongPsf` | ... with a wrong PSF | a model 4 % too wide; one 4 % too narrow in a crowded field | chi2 > 20 |
+| `PsfFitQualityTestCase.testTooFewStars` | Too few bright stars | 6 stars | chi2 NaN (cannot judge) |
 | `RefitPsfOptionTestCase.testValues` | PIFF is the only PSF refit | `refitPsf` default, True, False, "stack", "pca" | "piff", "piff", off, `ValueError`, `ValueError` |
 | `RefitPsfOptionTestCase.testPresets` | Every preset refits the PSF with PIFF | the crowded, crowded-stellar and fast presets | `refitPsf` "piff" |
 | `RefitPsfOptionTestCase.testRemovedRefits` | The residual-stack refits are gone | `pipeline` | no `refinePsfClean`, `refinePsfSpatial` |
@@ -286,8 +289,9 @@ real code.
 | `FitStitchTestCase.testFailingTileDoesNotStopTask` | One failing tile | one tile raises an error | the other 8 written; the gap marked in the TILE map |
 | `FitStitchTestCase.testParallelWorkersSameAsSerial` | `fitTiles(nJobs=3)`: tiles fitted in forked worker processes | the synthetic 3 x 3-tile detector, one tile raising an error | 8 tile files and 9 logs; a rerun fits only the failed tile; the stitched model, tile map and catalogue equal a serial run's |
 | `FitStitchTestCase.testConfigSettingsNotOverridden` | `fitTiles` leaves the configuration's own `maxOuter` alone (e.g. a single-pass configuration) | a configuration with `maxOuter=1`, then an explicit `maxOuter=2` | no `maxOuter` override in the first call (`maxInner` gets its default 15); the explicit 2 in the second |
-| `SampleTilesTestCase.test` | `sampleTiles` spreads the detector-PSF tiles | the 121 tiles of a 4096 x 4004 detector, 16 wanted | 16 distinct tiles in 4 columns and 4 rows spanning the detector; all tiles when there are fewer |
+| `SampleTilesTestCase.test` | `sampleTiles` spreads the detector-PSF tiles out to the edges | the 121 tiles of a 4096 x 4004 detector, 16 and 25 wanted | 16 distinct tiles in 4 columns and 4 rows spanning the detector; with 25 the four corner tiles; all tiles when there are fewer |
 | `DetectorPsfTestCase.testOneFitThenOnePassPerTile` | `fitTiles(detectorPsf=True)` | a 3 x 3 tile synthetic detector, 4 sampled tiles, PIFF replaced by a recording stand-in | the samples get one pass without a refit; PIFF gets every star inside the sampled interiors, on data - model + those stars, with the requested order; then every tile gets one pass with the new PSF |
+| `DetectorPsfTestCase.testTileWithABadPsfGetsItsOwnRefit` | The per-tile check | one tile whose stars the detector PSF does not fit (chi2 40) | that tile alone gets its own PSF and a second pass; the others keep the detector PSF |
 | `DetectorPsfTestCase.testPiffFailureKeepsThePerTileRefit` | A failed detector PSF | the stand-in raises | the session keeps the visit PSF and the tiles keep the per-tile refit settings |
 | `CpuLimitTestCase.testQuota` | `availableCpus` reads container CPU quotas, which do not hide the node's cores | fake cgroup v2 / v1 files (4-CPU quota on 128 visible cores, no quota, fractional quota, no files) | 4, 128, 2, 128, 128, 1; and never more than the visible CPUs |
 | `CpuLimitTestCase.testLimitBlasThreads` | `limitBlasThreads` caps NumPy's BLAS / OpenMP threads | a cap of 2 | every thread pool has <= 2 threads and the environment variables say 2 (skipped without threadpoolctl) |

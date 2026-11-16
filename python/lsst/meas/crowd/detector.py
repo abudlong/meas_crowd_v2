@@ -390,9 +390,11 @@ def fitTiles(visit, detector, config=None, outDir="detector_run", tile=400, pad=
     if P["detectorPsf"]:
         psfDet = fitDetectorPsf(sess, visitImage, todo, cfg, kw, P, nJobs, outDir)
         if psfDet is not None:
-            sess.psf = psfDet                    # every tile: one pass with the detector's PSF
+            # every tile: one pass with the detector's PSF, then its own refit only if that PSF
+            # does not fit its bright stars
+            sess.psf = psfDet
             kw.update(maxOuter=1, minOuter=1, refitPsf=False)
-            _TILE["kw"] = kw
+            _TILE.update(kw=kw, checkP=P)
     if nJobs and nJobs > 1 and len(names) > 1:
         import multiprocessing as mp
         from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -401,12 +403,22 @@ def fitTiles(visit, detector, config=None, outDir="detector_run", tile=400, pad=
         _TILE["logDir"] = logDir
         n = min(int(nJobs), len(names))
         print(f"fitting {len(names)} tile(s) with {n} parallel workers; per-tile logs in {logDir}")
+        notes = []
         with ProcessPoolExecutor(n, mp_context=mp.get_context("fork")) as ex:
             futs = [ex.submit(_fitTileWorker, name) for name in names]
             for k, fut in enumerate(as_completed(futs)):
                 name, ok, secs, nIn, err = fut.result()
+                if ok and err:
+                    notes.append(err)
                 print(f"[{k + 1}/{len(names)}, {time.perf_counter() - tAll:6.0f} s] tile {name}: "
-                      + (f"{nIn} sources, {secs:.0f} s" if ok else f"FAILED ({err}) -- rerun to retry"))
+                      + (f"{nIn} sources, {secs:.0f} s" + (f" | {err}" if err else "") if ok
+                         else f"FAILED ({err}) -- rerun to retry"))
+        if _TILE.get("checkP") is not None and notes:
+            nRef = sum("refitted" in t for t in notes)
+            nTry = sum("->" in t or "refit failed" in t for t in notes)
+            print(f"detector PSF check: {len(notes) - nTry} tile(s) kept the detector PSF, {nTry} "
+                  f"needed their own refit ({nRef} refitted, {nTry - nRef} kept the detector PSF "
+                  f"after all); threshold chi2 {_TILE['checkP']['detectorPsfMaxChi2']:g}")
     else:
         try:                                     # no more BLAS threads than usable CPUs
             from threadpoolctl import threadpool_limits
@@ -509,7 +521,10 @@ _TILE = {}       # state shared with forked tile workers (set by fitTiles, nothi
 
 
 def sampleTiles(specs, n, width, height, x0=0, y0=0):
-    """Pick about ``n`` tiles spread over the detector: the tile nearest each point of an even grid.
+    """Pick about ``n`` tiles spread evenly over the detector, edges and corners included.
+
+    The tile nearest each point of a square grid that runs from the first to the last tile centre
+    in x and y, so the detector PSF is fitted out to every edge instead of being extrapolated there.
 
     Parameters
     ----------
@@ -533,10 +548,12 @@ def sampleTiles(specs, n, width, height, x0=0, y0=0):
     k = max(1, int(round(np.sqrt(n))))
     cx = np.array([s[0] + s[2] / 2 for s in specs])
     cy = np.array([s[1] + s[3] / 2 for s in specs])
+    gx = np.linspace(cx.min(), cx.max(), k)
+    gy = np.linspace(cy.min(), cy.max(), k)
     picks = []
-    for fy in (np.arange(k) + 0.5) / k:
-        for fx in (np.arange(k) + 0.5) / k:
-            d = np.hypot(cx - (x0 + fx * width), cy - (y0 + fy * height))
+    for ty in gy:
+        for tx in gx:
+            d = np.hypot(cx - tx, cy - ty)
             for i in np.argsort(d):
                 if specs[i] not in picks:
                     picks.append(specs[i])
@@ -714,10 +731,12 @@ def _fitTile(name):
     plotNames, plotDir = _TILE["plotNames"], _TILE["plotDir"]
     allSourcePages, visit, detector = _TILE["allSourcePages"], _TILE["visit"], _TILE["detector"]
     t0 = time.perf_counter()
-    nIn = None
+    nIn, note = None, ""
     try:
         runs = runSessionGaia(sess, cfg, names=[name], plotFinal=False, **kw)
         run = runs[name]
+        if _TILE.get("checkP") is not None:
+            run, note = _checkTilePsf(sess, cfg, kw, name, run, _TILE["checkP"])
         with contextlib.redirect_stdout(io.StringIO()):
             phot = (run.photometry if getattr(run, "photometry", None) is not None
                     else measurePhotometry(run, verbose=False, gaia=getattr(sess, "gaia", None)))
@@ -734,14 +753,58 @@ def _fitTile(name):
             print(f"######## tile {name}: plots took {time.perf_counter() - t1:.0f} s")
         nIn = int(np.sum(phot["inInterior"])) if "inInterior" in phot.colnames else len(phot)
         print(f"######## tile {name}: {nIn} sources in its interior, "
-              f"{time.perf_counter() - t0:.0f} s -> {paths[name]}")
+              f"{time.perf_counter() - t0:.0f} s -> {paths[name]}" + (f" | {note}" if note else ""))
     except Exception as e:                       # keep going: one bad tile must not kill the job
         import traceback
         traceback.print_exc()
         print(f"######## tile {name} FAILED ({type(e).__name__}: {e}) -- rerun to retry")
     finally:
         sess.jobs.pop(name, None)                # free the cutout
+    _TILE["lastNote"] = note
     return nIn
+
+
+def _checkTilePsf(sess, cfg, kw, name, run, P):
+    """After a pass with the detector PSF: refit this tile's PSF if it does not fit its stars.
+
+    The bright stars' stacked residual (`lsst.meas.crowd.pipeline.psfFitQuality`) is judged
+    against ``detectorPsfMaxChi2``.  Above it, PIFF is refitted on the tile's own clean stars
+    (`lsst.meas.crowd.pipeline.refitPsfPiff`, as the per-tile refit does) and the tile gets a
+    second pass with that PSF; whichever pass fits its stars better is kept.
+
+    Returns
+    -------
+    run : `lsst.meas.crowd.session.CutoutRun`
+        The tile's run (the refitted one if it fits better).
+    note : `str`
+        What was done, for the run's summary line.
+    """
+    import copy
+    from .pipeline import psfFitQuality, refitPsfPiff, runSessionGaia
+    interior = sess.jobs[name]["interior"]
+    q = psfFitQuality(run, interior=interior)
+    thr = float(P["detectorPsfMaxChi2"])
+    head = f"detector PSF: bright-star chi2 {q['chi2']:.2f} from {q['nStars']} stars"
+    if not np.isfinite(q["chi2"]) or q["chi2"] <= thr:
+        why = "too few bright stars to judge" if not np.isfinite(q["chi2"]) else f"<= {thr:g}"
+        print(f"######## tile {name}: {head} ({why}) -> kept")
+        return run, f"PSF chi2 {q['chi2']:.1f}, kept"
+    print(f"######## tile {name}: {head} > {thr:g} -> refitting this tile's PSF with PIFF")
+    try:
+        h = run.outerHistory[-1]
+        psfTile = refitPsfPiff(h["exposure"], h["psf"], h["result"], P, interior.getCenter())
+        sessTile = copy.copy(sess)
+        sessTile.psf = psfTile
+        run2 = runSessionGaia(sessTile, cfg, names=[name], plotFinal=False, **kw)[name]
+        q2 = psfFitQuality(run2, interior=interior)
+    except Exception as e:
+        print(f"######## tile {name}: tile PSF refit failed ({type(e).__name__}: {e}) -> kept")
+        return run, f"PSF chi2 {q['chi2']:.1f}, refit failed"
+    better = np.isfinite(q2["chi2"]) and q2["chi2"] < q["chi2"]
+    print(f"######## tile {name}: with its own PSF, bright-star chi2 {q2['chi2']:.2f} -> "
+          f"{'refit kept' if better else 'detector PSF kept'}")
+    return (run2 if better else run), (f"PSF chi2 {q['chi2']:.1f} -> {q2['chi2']:.1f}, "
+                                       f"{'refitted' if better else 'refit not better'}")
 
 
 def _fitTileWorker(name):
@@ -768,8 +831,9 @@ def _fitTileWorker(name):
     try:
         with open(log, "w") as fh, contextlib.redirect_stdout(fh), contextlib.redirect_stderr(fh), limit:
             nIn = _fitTile(name)
-        return name, nIn is not None, time.perf_counter() - t0, nIn, None if nIn is not None \
-            else f"see {log}"
+        # ok: the last item is the tile's note (detector PSF check), else the error
+        return name, nIn is not None, time.perf_counter() - t0, nIn, \
+            (_TILE.get("lastNote") or None) if nIn is not None else f"see {log}"
     except Exception as e:
         return name, False, time.perf_counter() - t0, None, f"{type(e).__name__}: {e}"
 

@@ -2,7 +2,7 @@
 
 Every public function and class of `lsst.meas.crowd`: what it does, its parameters (with types and defaults) and what it returns.  Generated from the docstrings by `doc/make_function_reference.py`; do not edit by hand (run `python doc/make_function_reference.py` after changing a docstring).  How the pipeline fits together is in [pipeline_guide.md](pipeline_guide.md); the output catalogue in [catalog_columns.md](catalog_columns.md).
 
-193 functions and 5 classes in 13 modules.  Everything listed here can be used as `crowd.<name>` after `import lsst.meas.crowd as crowd`, or from its module (`from lsst.meas.crowd import photometry`).  Names starting with `_` are internal helpers and are not listed.
+194 functions and 5 classes in 13 modules.  Everything listed here can be used as `crowd.<name>` after `import lsst.meas.crowd as crowd`, or from its module (`from lsst.meas.crowd import photometry`).  Names starting with `_` are internal helpers and are not listed.
 
 ## Start here
 
@@ -28,7 +28,7 @@ Every public function and class of `lsst.meas.crowd`: what it does, its paramete
 
 | Module | Role | Public functions / classes |
 | --- | --- | --- |
-| [`pipeline`](#pipeline) | the driver: run the pipeline on cutouts from Gaia starting positions, inner / outer loops, PSF refinement, diagnostics | 44 |
+| [`pipeline`](#pipeline) | the driver: run the pipeline on cutouts from Gaia starting positions, inner / outer loops, PSF refinement, diagnostics | 45 |
 | [`session`](#session) | load a visit, cut out regions, set up the PSF; configuration; saving runs | 19 |
 | [`gaiaCatalog`](#gaiacatalog) | the Gaia catalogue and the starting positions of each cutout | 4 |
 | [`photometry`](#photometry) | PSF and aperture photometry, errors, the Gaia comparison | 9 |
@@ -74,6 +74,7 @@ Adaptive, iterative joint PSF-fitting pipeline starting from Gaia positions.
 | [`psfStarImage`](#pipelinepsfstarimage) | Return the image with every source's model subtracted except the PSF stars ``idx``. |
 | [`refitPsfPiff`](#pipelinerefitpsfpiff) | Refit the PSF with PIFF (the Rubin pipelines' PSF determiner) on neighbour-subtracted stars. |
 | [`fitPiff`](#pipelinefitpiff) | Fit a PIFF PSF to stars on a neighbour-subtracted image. |
+| [`psfFitQuality`](#pipelinepsffitquality) | How well a tile's PSF fits its bright stars: chi2 of their stacked residual. |
 | [`psfStarSample`](#pipelinepsfstarsample) | Clean PSF stars of a fitted tile, for a detector-level PSF fit. |
 | [`selectPsfStars`](#pipelineselectpsfstars) | Select clean, bright, isolated, unsaturated point sources for the PSF stack. |
 | [`refinePsfMedian`](#pipelinerefinepsfmedian) | Correct the PSF core with the median residual/flux of the bright clean stars. |
@@ -568,6 +569,27 @@ Each star becomes a PSF candidate at its position, with a circular footprint and
 | `nCands` | `int` | Stars given to PIFF. |
 | `cfg` | `lsst.pex.config.Config` | The PIFF determiner's configuration. |
 | `model, stamp` | `int` | PIFF model size and star stamp size [px]. |
+
+### pipeline.psfFitQuality
+
+`psfFitQuality(run, minSnr=50.0, half=8, core=4.0, minStars=8, interior=None)`
+
+How well a tile's PSF fits its bright stars: chi2 of their stacked residual.
+
+The residual of the joint fit (without the bright-star correction terms, which would absorb a PSF error) is cut out around every star with peak S/N >= ``minSnr`` whose box has no bad pixel, divided by the star's flux and stacked.  Each pixel's mean is compared with its star-to-star scatter / sqrt(N): noise and neighbours (crowding) average away and give a chi2 per core pixel of about 1, a PSF error is the same in every star and gives much more.  Each box's level (the median of its edge ring) is subtracted first, so the light of unmodelled faint stars under all of them does not count as a PSF error.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `run` | `lsst.meas.crowd.session.CutoutRun` | A fitted tile (its last pass is used). |
+| `minSnr` | `float`, optional | Stars with at least this peak S/N are used. |
+| `half` | `int`, optional | Half-size of the stacked boxes [px]. |
+| `core` | `float`, optional | Radius [px] within which the chi2 is averaged. |
+| `minStars` | `int`, optional | Fewer usable stars: chi2 is NaN (cannot judge). |
+| `interior` | `lsst.geom.Box2I`, optional | Only stars inside it. |
+
+| Returns | Type | Description |
+| --- | --- | --- |
+| `quality` | `dict` | ``chi2`` (mean over the core pixels of (stack mean / its error)^2), ``nStars`` and ``peakFrac`` (largest core residual as a fraction of the PSF peak). |
 
 ### pipeline.psfStarSample
 
@@ -2085,7 +2107,7 @@ Whole-detector runs: tile, fit, stitch.
 | [`fitTiles`](#detectorfittiles) | Fit this task's share of a detector's tiles and write one file per tile. |
 | [`availableCpus`](#detectoravailablecpus) | Return the number of CPUs this process may actually use. |
 | [`limitBlasThreads`](#detectorlimitblasthreads) | Cap the threads of NumPy's BLAS / OpenMP libraries in this process (default: the usable CPUs). |
-| [`sampleTiles`](#detectorsampletiles) | Pick about ``n`` tiles spread over the detector: the tile nearest each point of an even grid. |
+| [`sampleTiles`](#detectorsampletiles) | Pick about ``n`` tiles spread evenly over the detector, edges and corners included. |
 | [`fitDetectorPsf`](#detectorfitdetectorpsf) | Fit one PIFF PSF for the whole detector from a sample of tiles. |
 | [`stitchTiles`](#detectorstitchtiles) | Assemble the tile files into full-detector images and one catalogue. |
 | [`loadMosaic`](#detectorloadmosaic) | Read the files written by `stitchTiles`. |
@@ -2231,7 +2253,9 @@ Under a cgroup CPU quota, BLAS libraries start one thread per *visible* core (12
 
 `sampleTiles(specs, n, width, height, x0=0, y0=0)`
 
-Pick about ``n`` tiles spread over the detector: the tile nearest each point of an even grid.
+Pick about ``n`` tiles spread evenly over the detector, edges and corners included.
+
+The tile nearest each point of a square grid that runs from the first to the last tile centre in x and y, so the detector PSF is fitted out to every edge instead of being extrapolated there.
 
 | Parameter | Type | Description |
 | --- | --- | --- |

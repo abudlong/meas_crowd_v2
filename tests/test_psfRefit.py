@@ -269,6 +269,46 @@ class PiffFailureReportTestCase(unittest.TestCase):
         self.assertIn("report failed", buf.getvalue())
 
 
+class PsfFitQualityTestCase(unittest.TestCase):
+    """`pipeline.psfFitQuality`: about 1 for the right PSF, crowded or not; large for a wrong one."""
+
+    @staticmethod
+    def _run(sigmaModel, nMissing=0, seed=1, n=200, nStars=160):
+        rng = np.random.default_rng(seed)
+        xy = rng.uniform(10, n - 10, (nStars, 2))
+        f = 10 ** rng.uniform(3.3, 5.3, nStars)
+        yy, xx = np.mgrid[:n, :n]
+
+        def img(pos, flux, s):
+            out = np.zeros((n, n))
+            for (x, y), fl in zip(pos, flux):
+                out += fl * np.exp(-((xx - x) ** 2 + (yy - y) ** 2) / (2 * s * s)) / (2 * np.pi * s * s)
+            return out
+
+        truth = img(xy, f, 2.5)
+        extra = img(rng.uniform(0, n, (nMissing, 2)), 10 ** rng.uniform(2.5, 3.2, nMissing), 2.5)
+        var = 400 + truth + extra
+        exp = lsstStubs.FakeExposure(truth + extra + rng.normal(size=(n, n)) * np.sqrt(var), var)
+        res = dict(S=pl._state(xy), snaps=[dict(fit=dict(amps=f, modelFull=img(xy, f, sigmaModel)))])
+        psf = lsstStubs.FakePsf(lsstStubs.gaussianKernel(2.5, 12))
+        return types.SimpleNamespace(outerHistory=[dict(exposure=exp, result=res, psf=psf)],
+                                     badBitmask=4)
+
+    def testRightPsf(self):
+        for nMissing in (0, 1200):                          # crowded: unmodelled faint stars
+            q = pl.psfFitQuality(self._run(2.5, nMissing))
+            self.assertGreater(q["nStars"], 20)
+            self.assertLess(q["chi2"], 2.0, msg=f"{nMissing} unmodelled stars")
+
+    def testWrongPsf(self):
+        self.assertGreater(pl.psfFitQuality(self._run(2.6))["chi2"], 20.0)       # 4 % too wide
+        self.assertGreater(pl.psfFitQuality(self._run(2.4, 1200))["chi2"], 20.0)
+
+    def testTooFewStars(self):
+        q = pl.psfFitQuality(self._run(2.5, nStars=6))
+        self.assertTrue(np.isnan(q["chi2"]))
+
+
 class RefitPsfOptionTestCase(unittest.TestCase):
     """PIFF is the pipeline's only PSF refit."""
 
