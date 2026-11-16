@@ -716,9 +716,10 @@ def _psfNote(run, fromGrid):
         return "own PIFF PSF" if len(h) > 1 else ""
     c1 = h[0].get("psfChi2", float("nan"))
     if len(h) == 1:
+        if h[0].get("refitRejected"):
+            return f"PSF chi2 {c1:.1f}, refit not better, grid PSF kept"
         return f"PSF chi2 {c1:.1f}, grid PSF kept"
-    from .pipeline import psfFitQuality
-    c2 = psfFitQuality(run)["chi2"]
+    c2 = h[-1].get("psfChi2", float("nan"))
     return f"PSF chi2 {c1:.1f} -> {c2:.1f}, refitted"
 
 

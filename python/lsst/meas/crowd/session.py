@@ -509,8 +509,6 @@ def prepareSession(visit, detector, cutouts, pad=0, psfSource="refit",
     badBitmask = (mk.getPlaneBitMask("SAT") | mk.getPlaneBitMask("CR") |
                    mk.getPlaneBitMask("BAD") | mk.getPlaneBitMask("INTRP") |
                    mk.getPlaneBitMask("EDGE"))
-    if "SPIKE" in mk.getMaskPlaneDict():         # diffraction spikes of bright stars: not
-        badBitmask |= mk.getPlaneBitMask("SPIKE")   # point sources, fitted as stars otherwise
 
     G = L.geom
     jobs = {}

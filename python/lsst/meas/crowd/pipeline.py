@@ -4887,6 +4887,17 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
                     print(f"  brightness term failed ({type(e).__name__}: {e})")
         expN.setPsf(psfNew)
         expW, psfW = expN, psfNew
+    if P["psfRefitMaxChi2"] and P["refitPsf"] and len(hist) > 1 \
+            and np.isfinite(hist[-2].get("psfChi2", np.nan)):
+        # a conditional refit is kept only if its stars fit better than the pass before it
+        import types
+        q = psfFitQuality(types.SimpleNamespace(outerHistory=[hist[-1]], badBitmask=badBitmask))
+        hist[-1]["psfChi2"] = q["chi2"]
+        if not (q["chi2"] < hist[-2]["psfChi2"]):
+            print(f"PSF check: after the refit the bright-star chi2 is {q['chi2']:.2f}, not better "
+                  f"than {hist[-2]['psfChi2']:.2f} -> the pass before the refit is kept")
+            hist[-2]["refitRejected"] = True
+            hist.pop()
     printTiming()
     return hist
 

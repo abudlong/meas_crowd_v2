@@ -133,7 +133,7 @@ In both cases the PSF is then refitted inside each cutout between passes with PI
 | `detectorPsf` | False (fast preset: True) | Whole-detector runs: a grid of local PIFF PSFs from sampled tiles; the other tiles start from their interpolation |
 | `detectorPsfTiles`, `detectorPsfNeighbours` | 25, 4 | Tiles sampled (out to the edges); local PSFs averaged per tile |
 | `detectorPsfMaxChi2` | 5 | A tile whose bright stars' stacked residual has a larger core chi2 (`psfFitQuality`, ~1 = PSF right) refits its own PSF and gets a second pass |
-| `psfRefitMaxChi2` | 0 | > 0: after a pass, refit the PSF only if the bright stars' chi2 is above this (0 = always) |
+| `psfRefitMaxChi2` | 0 | > 0: after a pass, refit the PSF only if the bright stars' chi2 is above this (0 = always); the refitted pass is kept only if its chi2 is lower |
 | `psfWingSize`, `psfExtBlend` | 81 px, (12, 16) px | Kernel size after the wing extension and the radii of the Moffat blend |
 | `wingsFromStars` | True | Measure the outer wings from bright and saturated stars |
 | `minOuter`, `maxOuter` | 2, 6 (CLI 3) | Number of outer passes |

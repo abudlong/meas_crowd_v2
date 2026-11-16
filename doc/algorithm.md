@@ -352,7 +352,7 @@ is stacked; the chi2 of the stack's core against its star-to-star error is about
 right (noise and neighbours average away; on synthetic fields 0.7-1.5 even with many unmodelled
 faint stars) and 20 or more when it is 1 % too wide.  Above `detectorPsfMaxChi2` = 5 the tile
 refits PIFF on its own stars and runs a second pass from the first pass's sources, as the per-tile
-method does.  A single PIFF fit over the whole detector with a quadratic variation was tried
+method does; the second pass is kept only if its stars fit better (else the first pass is).  A single PIFF fit over the whole detector with a quadratic variation was tried
 first: on det 144 it took 83 s on one CPU and 51 of 121 tiles failed the check, so the PSF varies
 there on scales a quadratic cannot follow.  Nothing depends on where a detector is crowded: a tile
 pays for a second pass only where the local PSF does not do.
