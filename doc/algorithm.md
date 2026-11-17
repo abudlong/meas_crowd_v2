@@ -345,7 +345,16 @@ mask; fitted as stars or halo, it leaves dark-and-light streaks along the trail.
 masked region is treated as a trail: beside it, the median of the data along the trail at 1, 2, ...
 px from its edge is compared with a reference band further out, and the trail is widened by the
 offsets that are significantly brighter (up to 10 px per side; stars on the trail hardly move the
-medians).  Round saturated cores are left to `satGrowPx`.
+medians).  Beyond each end, row by row, the trail's columns are compared with sky on both sides
+and the mask is extended while they stay significantly brighter (up to 60 px): the bleed
+continues past the saturated pixels.  A bright star sitting right at a trail's end can extend it
+by a few rows.  Round saturated cores are left to `satGrowPx`.
+
+**Sources on masked pixels** (`minPsfCoverage`).  A source with less than half of its PSF stamp's
+light on usable pixels (centred on a masked detector edge, a trail or a bad column) has a flux and
+correction terms constrained by a few pixels and makes nonsense of the model around it; it is
+dropped at every prune.  Sources within 2 FWHM of saturated pixels are exempt (their cores are
+masked by design).
 
 **Grid of local PSFs** (`detectorPsf`, whole-detector runs).  Refitting the PSF in every tile
 costs a second pass per tile.  Instead, about 25 tiles spread over the detector out to its edges

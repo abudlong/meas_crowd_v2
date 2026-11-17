@@ -4,7 +4,7 @@ Every unit test in `tests/`: what it checks, what it feeds in, and what it must 
 pass.  How to run them and read the results is in the
 [pipeline guide](pipeline_guide.md#unit-tests-running-them-and-checking-the-results).
 
-The suite has **169 tests in 15 files**.  Without the Rubin stack 167 run and the 2 in
+The suite has **171 tests in 15 files**.  Without the Rubin stack 169 run and the 2 in
 `test_fastStampsStack.py` are skipped; `testCxxEqualsNumpy` is also skipped if the C++ extension
 was not built, and the `test_sparseSolver.py` solver tests if it was built without the
 sparse solver.  `test_docstrings.py` checks that this page lists every test and that the
@@ -218,8 +218,10 @@ Stellar-field configuration (`StellarConfigTestCase`):
 | --- | --- | --- | --- |
 | `StellarConfigTestCase.testPresetIsCrowdedPlusStellarSettings` | `CROWDED_STELLAR_FIELD_CONFIG` is `CROWDED_FIELD_CONFIG` plus the five validated settings, and `makeConfig` keeps them | the two presets | equal to `CROWDED_FIELD_CONFIG` + (psfStackIsoFwhm 1, psfStackMinSnr 30, psfStackN 80, ellipTest and keepExtended off); the library defaults unchanged |
 | `StellarConfigTestCase.testCommandLineConfigNames` | `crowdDetector.py --config` names point at the presets | `CONFIGS` of `bin.src/crowdDetector.py` | "stellar" → `CROWDED_STELLAR_FIELD_CONFIG`, "crowded" → `CROWDED_FIELD_CONFIG`, "fast" → `FAST_STELLAR_FIELD_CONFIG` (whose options are all valid; one pass) |
+| `LowCoverageTestCase.test` | `_lowCoverage` drops sources with most of their PSF masked | sources centred in a masked edge, 4 px inside it, clear, on a masked patch, and in the edge near a saturated star | the first and the fourth; off when the cut is 0 |
 | `TrailWingMaskTestCase.testWidensWhereTheDataIsElevated` | `trailWingMask` finds bleed-trail light beside a masked trail | a 4 px wide masked trail with wings 3 px left and 2 px right, 300 stars, a round saturated core; also rotated 90 degrees | exactly those 3 + 2 columns, not the core |
-| `TrailWingMaskTestCase.testNothingWithoutWings` | No wings | the same trail without them | nothing widened |
+| `TrailWingMaskTestCase.testExtendsBeyondTheEnds` | The bleed continuing past the masked trail | the trail of the test above, with 12 and 25 px of bleed past its ends | extended by exactly 12 and 25 px, over the trail and its wings |
+| `TrailWingMaskTestCase.testNothingWithoutWings` | No wings | the same trail without them | nothing widened and nothing extended, except at most 12 rows past the end where a bright star sits on it |
 | `NearBrightFakesTestCase.test` | After a light pass, faint non-Gaia sources around bright stars are flagged | a bright star with faint neighbours at 4 and 12 px, a far one, a Gaia neighbour, and an 8%-flux neighbour | only the faint non-Gaia one within the radius and below the flux ratio |
 
 ## test_diagnostics.py

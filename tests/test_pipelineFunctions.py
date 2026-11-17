@@ -598,6 +598,34 @@ class StellarConfigTestCase(unittest.TestCase):
         self.assertTrue(P["detectorPsf"])                  # fitTiles: one PSF for the detector
 
 
+class LowCoverageTestCase(unittest.TestCase):
+    """`pipeline._lowCoverage`: sources with most of their PSF on masked pixels."""
+
+    def test(self):
+        n, half = 60, 6
+        u = np.arange(-half, half + 1)
+        st = np.exp(-0.5 * (u[None] ** 2 + u[:, None] ** 2) / 2.0 ** 2)
+        good = np.ones((n, n), bool)
+        good[:5] = False                                  # a masked detector edge (rows 0-4)
+        good[30:40, 50:54] = False                        # a small masked patch
+        xy = np.array([[20.0, 3.0], [20.0, 9.0], [30.0, 30.0], [52.0, 35.0], [10.0, 2.0]])
+        comps = []
+        for x, y in xy:
+            ys = slice(max(int(y) - half, 0), min(int(y) + half + 1, n))
+            xs = slice(max(int(x) - half, 0), min(int(x) + half + 1, n))
+            comps.append(dict(stamp=st[ys.start - int(y) + half:ys.stop - int(y) + half,
+                                       xs.start - int(x) + half:xs.stop - int(x) + half],
+                              ys=ys, xs=xs))
+        fit = dict(comps=comps, good=good)
+        satNear = np.zeros((n, n), bool)
+        satNear[0:6, 5:15] = True                         # near a saturated star: exempt
+        low = pl._lowCoverage(fit, xy, 0.5, satNear, 0, 0)
+        # 0: centred in the masked edge -> dropped; 1: 4 px inside, most light usable -> kept;
+        # 2: clear -> kept; 3: on the masked patch -> dropped; 4: in the edge but near SAT -> kept
+        np.testing.assert_array_equal(low, [True, False, False, True, False])
+        self.assertFalse(pl._lowCoverage(fit, xy, 0.0, satNear, 0, 0).any())   # off
+
+
 class TrailWingMaskTestCase(unittest.TestCase):
     """`pipeline.trailWingMask`: bleed-trail light beside the masked trail, from the data."""
 
@@ -630,15 +658,27 @@ class TrailWingMaskTestCase(unittest.TestCase):
             line = wing[:, 100] if horizontal else wing[100]
             np.testing.assert_array_equal(np.flatnonzero(line), [137, 138, 139, 144, 145])
             self.assertEqual(len(info), 1)
-            self.assertEqual(info[0][4:], (3, 2))
+            self.assertEqual(info[0][4:6], (3, 2))
             self.assertFalse(wing[195:217, 35:57].any() if not horizontal
                              else wing[35:57, 195:217].any())               # not round cores
+
+    def testExtendsBeyondTheEnds(self):
+        img, mask = self._scene()
+        img[330:355, 140:144] += np.linspace(600, 150, 25)[:, None]   # 25 px past the top end
+        img[38:50, 140:144] += 400                                     # 12 px past the bottom
+        wing, info = pl.trailWingMask(img, mask, 1)
+        self.assertEqual(info[0][4:], (3, 2, 12, 25))
+        self.assertTrue(wing[354, 137:146].all() and not wing[355:358, 137:146].any())
+        self.assertTrue(wing[38, 137:146].all() and not wing[34:38, 137:146].any())
 
     def testNothingWithoutWings(self):
         img, mask = self._scene(wings=False)
         wing, info = pl.trailWingMask(img, mask, 1)
-        self.assertEqual(int(wing.sum()), 0)
-        self.assertEqual(info, [])
+        # no widening and nothing past the bottom end; past the top end the bright star at
+        # (144, 335) sitting on the trail's end is taken for bleed (a known limitation)
+        self.assertEqual(info[0][4:7], (0, 0, 0))
+        self.assertLessEqual(info[0][7], 12)
+        self.assertFalse(wing[:330].any())
 
 
 class NearBrightFakesTestCase(unittest.TestCase):

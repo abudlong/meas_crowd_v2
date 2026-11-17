@@ -233,11 +233,11 @@ The median (data centroid - Gaia position) of bright, unsaturated, fairly isolat
 
 ### pipeline.trailWingMask
 
-`trailWingMask(image, mask, trailBits, maxGrow=10, minLen=30, nSigma=3.0)`
+`trailWingMask(image, mask, trailBits, maxGrow=10, minLen=30, nSigma=3.0, maxExtend=60)`
 
 Pixels beside masked bleed trails that still carry trail light (data-driven).
 
-Every masked region (``trailBits``) at least ``minLen`` px long and three times longer than wide is a trail, along its columns or its rows.  Beside it, at 1, 2, ... ``maxGrow`` px from its edge in every line, the median of the data along the trail is compared with the median of a reference band further out (``maxGrow`` + 3 .. + 8 px); the trail is widened, on each side, by the offsets that are in a row significantly brighter than the reference (stars on the trail hardly move the medians).
+Every masked region (``trailBits``) at least ``minLen`` px long and three times longer than wide is a trail, along its columns or its rows.  Beside it, at 1, 2, ... ``maxGrow`` px from its edge in every line, the median of the data along the trail is compared with the median of a reference band further out (``maxGrow`` + 3 .. + 8 px); the trail is widened, on each side, by the offsets that are in a row significantly brighter than the reference (stars on the trail hardly move the medians).  Beyond each end, line by line, the trail's columns (with their wings) are compared with bands of sky on both sides of them, and the trail is extended while they stay significantly brighter (up to ``maxExtend`` px): the bleed continues past the saturated pixels; the extension covers the wings too.
 
 | Parameter | Type | Description |
 | --- | --- | --- |
@@ -247,11 +247,12 @@ Every masked region (``trailBits``) at least ``minLen`` px long and three times 
 | `maxGrow` | `int`, optional | Largest widening per side [px]. |
 | `minLen` | `int`, optional | Shortest region counted as a trail [px]. |
 | `nSigma` | `float`, optional | Significance of an elevated offset. |
+| `maxExtend` | `int`, optional | Largest extension beyond each end [px]. |
 
 | Returns | Type | Description |
 | --- | --- | --- |
 | `wing` | `numpy.ndarray` [`bool`] | Pixels to mask in addition. |
-| `info` | `list` [`tuple`] | Per widened trail: (x0, x1, y0, y1, grown px on the low side, on the high side). |
+| `info` | `list` [`tuple`] | Per changed trail: (x0, x1, y0, y1, px grown on the low side, on the high side, px extended beyond the low end, beyond the high end). |
 
 ### pipeline.saturationLevel
 

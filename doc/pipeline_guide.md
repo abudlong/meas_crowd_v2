@@ -133,7 +133,8 @@ In both cases the PSF is then refitted inside each cutout between passes with PI
 | `detectorPsf` | False (fast preset: True) | Whole-detector runs: a grid of local PIFF PSFs from sampled tiles; the other tiles start from their interpolation |
 | `detectorPsfTiles`, `detectorPsfNeighbours` | 25, 4 | Tiles sampled (out to the edges); local PSFs averaged per tile |
 | `detectorPsfMaxChi2` | 5 | A tile whose bright stars' stacked residual has a larger core chi2 (`psfFitQuality`, ~1 = PSF right) refits its own PSF and gets a second pass |
-| `trailWingPx` | 10 | Widen masked bleed trails (SAT / INTRP, long and thin) by up to this many px per side where the data beside them is still elevated (`trailWingMask`) |
+| `trailWingPx` | 10 | Widen masked bleed trails (SAT / INTRP, long and thin) by up to this many px per side where the data beside them is still elevated, and extend them past their ends (up to 60 px) while the trail's columns stay elevated (`trailWingMask`) |
+| `minPsfCoverage` | 0.5 | Drop sources with less than this fraction of their PSF's light on usable pixels (centred on masked edges, trails, bad columns); sources near saturated pixels are exempt |
 | `psfRefitMaxChi2` | 0 | > 0: after a pass, refit the PSF only if the bright stars' chi2 is above this (0 = always); the refitted pass is kept only if its chi2 is lower |
 | `psfWingSize`, `psfExtBlend` | 81 px, (12, 16) px | Kernel size after the wing extension and the radii of the Moffat blend |
 | `wingsFromStars` | True | Measure the outer wings from bright and saturated stars |

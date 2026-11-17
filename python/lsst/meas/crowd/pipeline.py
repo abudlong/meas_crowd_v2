@@ -84,6 +84,9 @@ PIPELINE_DEFAULTS = dict(
     subtractInitialBg=True,  # subtract session.bgImage in pass 1
     keepAllFits=False,       # keep full fits (all PSF stamps) in every snapshot
     # ---- saturated / bright stars
+    minPsfCoverage=0.5,      # drop sources with less than this fraction of their PSF's light on
+                              #   usable pixels (centred on masked edges, trails, bad columns);
+                              #   sources near saturated pixels are exempt (0 = off)
     trailWingPx=10,          # widen masked bleed trails (SAT | INTRP, long and thin) by up to this
                               #   many px per side where the data beside them is still elevated
                               #   (trailWingMask; 0 = off)
@@ -1472,6 +1475,33 @@ def _refineSubsetPython(exposure, psf, S, fit, idx, maxShift, minAmp, freezeSep,
     return new
 
 
+def _lowCoverage(fit, xy, minCoverage, satNear, X0, Y0):
+    """Sources with less than ``minCoverage`` of their PSF stamp's light on usable pixels.
+
+    Such a source (centred on or beside masked detector edges, bleed trails or bad columns) has a
+    flux and correction terms constrained by a few pixels and makes nonsense of the model there.
+    Sources within ``satNear`` (near saturated pixels, whose cores are masked by design) are
+    exempt.  Positions are those the fit used (``fit['comps']``).
+    """
+    n = len(xy)
+    out = np.zeros(n, bool)
+    if not minCoverage or fit is None or "comps" not in fit or "good" not in fit:
+        return out
+    good = fit["good"]
+    ny, nx = good.shape
+    for j, c in enumerate(fit["comps"][:n]):
+        if c is None:
+            continue
+        ix, iy = int(round(xy[j, 0])) - X0, int(round(xy[j, 1])) - Y0
+        if 0 <= iy < ny and 0 <= ix < nx and satNear[iy, ix]:
+            continue
+        st = np.clip(c["stamp"], 0, None)
+        tot = st.sum()
+        if tot > 0 and (st * good[c["ys"], c["xs"]]).sum() < minCoverage * tot:
+            out[j] = True
+    return out
+
+
 def _pruneMerge(fit, S, minSnr, minSep, bright, nearSep, nearSnr, protect,
                 inZone=None, zoneSnr=None):
     """Prune low-S/N sources and merge close pairs, keeping the bookkeeping; return (alive, positions).
@@ -1617,7 +1647,7 @@ def _satlike(exposure):
     return out
 
 
-def trailWingMask(image, mask, trailBits, maxGrow=10, minLen=30, nSigma=3.0):
+def trailWingMask(image, mask, trailBits, maxGrow=10, minLen=30, nSigma=3.0, maxExtend=60):
     """Pixels beside masked bleed trails that still carry trail light (data-driven).
 
     Every masked region (``trailBits``) at least ``minLen`` px long and three times longer than
@@ -1625,7 +1655,10 @@ def trailWingMask(image, mask, trailBits, maxGrow=10, minLen=30, nSigma=3.0):
     its edge in every line, the median of the data along the trail is compared with the median of
     a reference band further out (``maxGrow`` + 3 .. + 8 px); the trail is widened, on each side,
     by the offsets that are in a row significantly brighter than the reference (stars on the
-    trail hardly move the medians).
+    trail hardly move the medians).  Beyond each end, line by line, the trail's columns (with
+    their wings) are compared with bands of sky on both sides of them, and the trail is extended
+    while they stay significantly brighter (up to ``maxExtend`` px): the bleed continues past the
+    saturated pixels; the extension covers the wings too.
 
     Parameters
     ----------
@@ -1641,13 +1674,16 @@ def trailWingMask(image, mask, trailBits, maxGrow=10, minLen=30, nSigma=3.0):
         Shortest region counted as a trail [px].
     nSigma : `float`, optional
         Significance of an elevated offset.
+    maxExtend : `int`, optional
+        Largest extension beyond each end [px].
 
     Returns
     -------
     wing : `numpy.ndarray` [`bool`]
         Pixels to mask in addition.
     info : `list` [`tuple`]
-        Per widened trail: (x0, x1, y0, y1, grown px on the low side, on the high side).
+        Per changed trail: (x0, x1, y0, y1, px grown on the low side, on the high side, px
+        extended beyond the low end, beyond the high end).
     """
     from scipy.ndimage import find_objects, label
     trail = (np.asarray(mask) & trailBits) != 0
@@ -1677,8 +1713,8 @@ def trailWingMask(image, mask, trailBits, maxGrow=10, minLen=30, nSigma=3.0):
             if len(c):
                 lo.append((r, c.min()))
                 hi.append((r, c.max()))
-        grown = []
-        ncol = I_.shape[1]
+        grown, sigs = [], []
+        ncol, nrow = I_.shape[1], I_.shape[0]
         for edges, sgn in ((lo, -1), (hi, +1)):
             def band(d):
                 v = [I_[r, e + sgn * d] for r, e in edges if 0 <= e + sgn * d < ncol]
@@ -1690,6 +1726,7 @@ def trailWingMask(image, mask, trailBits, maxGrow=10, minLen=30, nSigma=3.0):
                 continue
             med = np.median(ref)
             sig = 1.4826 * np.median(np.abs(ref - med))
+            sigs.append(sig)
             g = 0
             for d in range(1, maxGrow + 1):
                 v = band(d)
@@ -1702,8 +1739,30 @@ def trailWingMask(image, mask, trailBits, maxGrow=10, minLen=30, nSigma=3.0):
                     if 0 <= e + sgn * d < ncol:
                         W_[r, e + sgn * d] = True
             grown.append(g)
-        if any(grown):
-            info.append((sl[1].start, sl[1].stop - 1, sl[0].start, sl[0].stop - 1, *grown))
+        # beyond each end: the trail's columns (with their wings) against sky on both sides
+        ext = []
+        sig = float(np.median(sigs)) if sigs else 0.0
+        for (r0, c0), (_, c1), sgn in ((lo[0], hi[0], -1), (lo[-1], hi[-1], +1)):
+            a, b = c0 - grown[0], c1 + grown[1]
+            e = 0
+            for d in range(1, maxExtend + 1 if sig > 0 else 1):
+                rr = r0 + sgn * d
+                if not 0 <= rr < nrow:
+                    break
+                v = I_[rr, max(c0, 0):min(c1, ncol - 1) + 1]     # the trail's own columns
+                rv = np.concatenate([I_[rr, max(a - maxGrow - 8, 0):max(a - maxGrow - 3, 0)],
+                                     I_[rr, min(b + maxGrow + 3, ncol):min(b + maxGrow + 8, ncol)]])
+                v, rv = v[np.isfinite(v)], rv[np.isfinite(rv)]
+                if len(v) < 2 or len(rv) < 4:
+                    break
+                err = 1.25 * sig * np.sqrt(1.0 / len(v) + 1.0 / len(rv))
+                if not (np.median(v) - np.median(rv) > nSigma * err):
+                    break
+                W_[rr, max(a, 0):min(b, ncol - 1) + 1] = True
+                e = d
+            ext.append(e)
+        if any(grown) or any(ext):
+            info.append((sl[1].start, sl[1].stop - 1, sl[0].start, sl[0].stop - 1, *grown, *ext))
     return wing & ~trail, info
 
 
@@ -2948,6 +3007,14 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
     coreLab = (satCoreLabels(exposure, fwhm, P["satZoneMinPx"]) if P["oneSourcePerSat"]
                else np.zeros((ny, nx), np.int32))
     okpix = ~badMask & np.isfinite(data)
+    satNear = np.zeros((ny, nx), bool)              # near saturated pixels: exempt from the PSF
+    try:                                            #   coverage cut (their cores are masked)
+        satPix = (exposure.mask.array & exposure.mask.getPlaneBitMask("SAT")) != 0
+        if satPix.any():
+            from scipy.ndimage import distance_transform_edt
+            satNear = distance_transform_edt(~satPix) <= 2.0 * fwhm
+    except Exception:
+        pass
 
     def rstd(img):                  # residual std over usable pixels only
         return float(np.nanstd(img[okpix]))
@@ -3167,7 +3234,10 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
                 inside = ((x >= X0 - m) & (x <= bbox.getMaxX() + m) &
                           (y >= Y0 - m) & (y <= bbox.getMaxY() + m))
                 nEdge = int((alive & ~inside).sum())
-                S = _take(S, alive & inside)
+                lowCov = alive & inside & _lowCoverage(fit, S["xy"], P["minPsfCoverage"], satNear,
+                                                       X0, Y0)
+                nCov = int(lowCov.sum())
+                S = _take(S, alive & inside & ~lowCov)
                 if coreLab.any() and len(S["xy"]):
                     ampsNow = fit["amps"][np.flatnonzero(alive & inside)]
                     one = _onePerCore(S, ampsNow, coreLab, X0, Y0)
@@ -3177,6 +3247,9 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
                         S = _take(S, one)
                 if nEdge:
                     print(f"  dropped {nEdge} source(s) outside / within the edge margin")
+                if nCov:
+                    print(f"  dropped {nCov} source(s) with < {P['minPsfCoverage']:g} of their PSF "
+                          f"on usable pixels (masked edges, trails, bad columns)")
                 fit = _fit(exposure, psf, S, badBitmask, fit["modelFull"], fitkw) if len(S["xy"]) else None
             times["prune"] = rec["seconds"]
             if fit is None:
@@ -4739,10 +4812,10 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
                 bit = cutout.mask.getPlaneBitMask("TRAIL_WING")
                 cutout.mask.array[wing] |= bit
                 badBitmask = badBitmask | bit
-                print(f"bleed trails: {len(tinfo)} widened where the data beside them is still "
-                      f"elevated ({int(wing.sum())} px masked): "
-                      + ", ".join(f"x {a}-{b} y {c}-{d} +{g0}/+{g1} px"
-                                  for a, b, c, d, g0, g1 in tinfo[:6]))
+                print(f"bleed trails: {len(tinfo)} widened / extended where the data beside and "
+                      f"beyond them is still elevated ({int(wing.sum())} px masked): "
+                      + ", ".join(f"x {a}-{b} y {c}-{d} sides +{g0}/+{g1} px, ends +{e0}/+{e1} px"
+                                  for a, b, c, d, g0, g1, e0, e1 in tinfo[:6]))
     if P["satGrowPx"]:
         from scipy.ndimage import binary_dilation
         sat = (cutout.mask.array & cutout.mask.getPlaneBitMask("SAT")) != 0
