@@ -69,7 +69,7 @@ _API = {
     "sourcePlots": ["plotSourceCutouts", "sourceCutoutData"],
     "detector": ["availableCpus", "limitBlasThreads", "tileSpecs", "fitTiles", "stitchTiles", "loadMosaic", "loadTile",
                  "plotTile", "plotDetector", "saveTileProducts", "addTileResiduals",
-                 "gridPsfs", "sampleTiles"],
+                 "gridPsfs", "sampleTiles", "skyExtension", "buildSkyExtension"],
     "runPlots": ["saveRunPlots", "saveDetectorPlots", "showPsfStarStamps", "sampleTileNames"],
     "stagePlots": ["psfStarPositions", "showPsfStars", "showBackgrounds", "showRounds",
                    "showLinkedSourcePages", "comparePasses"],

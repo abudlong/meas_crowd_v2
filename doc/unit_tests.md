@@ -4,7 +4,7 @@ Every unit test in `tests/`: what it checks, what it feeds in, and what it must 
 pass.  How to run them and read the results is in the
 [pipeline guide](pipeline_guide.md#unit-tests-running-them-and-checking-the-results).
 
-The suite has **171 tests in 15 files**.  Without the Rubin stack 169 run and the 2 in
+The suite has **176 tests in 15 files**.  Without the Rubin stack 174 run and the 2 in
 `test_fastStampsStack.py` are skipped; `testCxxEqualsNumpy` is also skipped if the C++ extension
 was not built, and the `test_sparseSolver.py` solver tests if it was built without the
 sparse solver.  `test_docstrings.py` checks that this page lists every test and that the
@@ -294,6 +294,11 @@ real code.
 | `FitStitchTestCase.testParallelWorkersSameAsSerial` | `fitTiles(nJobs=3)`: tiles fitted in forked worker processes | the synthetic 3 x 3-tile detector, one tile raising an error | 8 tile files and 9 logs; a rerun fits only the failed tile; the stitched model, tile map and catalogue equal a serial run's |
 | `FitStitchTestCase.testConfigSettingsNotOverridden` | `fitTiles` leaves the configuration's own `maxOuter` alone (e.g. a single-pass configuration) | a configuration with `maxOuter=1`, then an explicit `maxOuter=2` | no `maxOuter` override in the first call (`maxInner` gets its default 15); the explicit 2 in the second |
 | `SampleTilesTestCase.test` | `sampleTiles` spreads the detector-PSF tiles out to the edges | the 121 tiles of a 4096 x 4004 detector, 16 and 25 wanted | 16 distinct tiles in 4 columns and 4 rows spanning the detector; with 25 the four corner tiles; all tiles when there are fewer |
+| `SkyExtensionTestCase.testBorderOnlyOutsideAndWithinReach` | `buildSkyExtension` rasterises a neighbour into the border | a neighbour 5 px beyond the edge with a star core, and pixels over the detector | only the 15 columns within reach, none over the detector, the star core dropped |
+| `SkyExtensionTestCase.testDuplicatesAveraged` | Overlapping neighbour pixels | two strips on the same pixels at -10 and -30 | averaged to -20 |
+| `SkyExtensionTestCase.testOffsetsReported` | `skyExtension`'s sky-level check | a neighbour whose sky is 6 counts lower | left offset -6, printed |
+| `ExtendSkyInputsTestCase.test` | `_extendSkyInputs` grows an edge tile's sky inputs | an interior and an edge tile, a subtracted background plane | interior: none; edge: grown on the edge side only, the tile unchanged inside, the plane extended to the border |
+| `MeshCentroidsTestCase.testPartlyCoveredCellsOnAPlane` | `_medianSkyMesh(centroids=True)` | a plane with the first column of cells half covered | exact to 0.05 with it, off by > 1 without |
 | `GridPsfsTestCase.test` | `gridPsfs` interpolates the local PSFs | two local kernels of different size, tiles on one, midway and nearer the other | the common size; the sample's own kernel on it; the mean midway; unit sum, closer to the nearer one |
 | `DetectorPsfTestCase.testSampledTilesFirstThenTheGrid` | `fitTiles(detectorPsf=True)` | a 3 x 3 tile synthetic detector, 4 sampled tiles whose 'PIFF' PSFs widen to the right | the sampled tiles first, with the visit PSF and an unconditional refit; every other tile once, from a unit-sum grid PSF between its neighbours' widths, with the check on; the summary lines |
 | `DetectorPsfTestCase.testATileWhereTheGridPsfFailsRefits` | The per-tile check | one tile whose first pass has chi2 30 | that tile refits (reported), the others keep the grid PSF |

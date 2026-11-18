@@ -339,6 +339,22 @@ the residual-stack refit used before (bottom-right scatter 1.12 vs 1.30), which 
 
 With fewer than `piffMinStars` = 10 clean stars, or if PIFF fails, the pass's PSF is kept.
 
+**Sky from the neighbouring detectors** (`skyExtendPx`, off by default; whole-detector runs).
+At a detector edge the sky mesh has data on one side only and extrapolates.  With
+`skyExtendPx` = 30, `fitTiles` finds the neighbouring detectors from the Butler's visit-detector
+regions, reads from each only the strip that maps within 30 px of this detector's edge, maps
+every pixel through both WCSs onto this detector's pixel grid and puts it on its flux scale
+through the two photometric calibrations (`skyExtension`, `buildSkyExtension`; bad pixels and
+star cores dropped, pixels landing on the same grid pixel averaged).  The edge tiles then fit
+their sky mesh over the tile plus that border and keep the part over the tile; the border never
+enters the star fit.  A border cell is only partly covered (the gap between detectors), so each
+cell's level is moved from its pixels' centroid to the cell centre along the mesh's gradient.  The
+run prints, per side, the median of the border against this detector's own pixels just inside:
+each detector's background was subtracted on its own, and an offset there is carried into the
+edge tiles' sky.  On synthetic edge tiles the border helps most where the tile's own edge pixels
+are masked (a steep dip: edge error +6.3 -> -2.2 counts, rms 2.4 -> 1.3), helps a little on smooth
+skies, and can overshoot on a steep dip whose edge pixels are all usable (+0.9 -> -1.7).
+
 **Bleed-trail wings** (`trailWingPx`).  Saturated stars' bleed trails are masked (SAT, and INTRP
 where the processing interpolated over them), but charge also spreads into the columns beside the
 mask; fitted as stars or halo, it leaves dark-and-light streaks along the trail.  Every long, thin

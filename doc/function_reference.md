@@ -2,7 +2,7 @@
 
 Every public function and class of `lsst.meas.crowd`: what it does, its parameters (with types and defaults) and what it returns.  Generated from the docstrings by `doc/make_function_reference.py`; do not edit by hand (run `python doc/make_function_reference.py` after changing a docstring).  How the pipeline fits together is in [pipeline_guide.md](pipeline_guide.md); the output catalogue in [catalog_columns.md](catalog_columns.md).
 
-194 functions and 5 classes in 13 modules.  Everything listed here can be used as `crowd.<name>` after `import lsst.meas.crowd as crowd`, or from its module (`from lsst.meas.crowd import photometry`).  Names starting with `_` are internal helpers and are not listed.
+196 functions and 5 classes in 13 modules.  Everything listed here can be used as `crowd.<name>` after `import lsst.meas.crowd as crowd`, or from its module (`from lsst.meas.crowd import photometry`).  Names starting with `_` are internal helpers and are not listed.
 
 ## Start here
 
@@ -35,7 +35,7 @@ Every public function and class of `lsst.meas.crowd`: what it does, its paramete
 | [`plotting`](#plotting) | final data / model / residual plots and residual diagnostics | 9 |
 | [`stagePlots`](#stageplots) | plots of the intermediate stages and pass-to-pass comparison | 6 |
 | [`sourcePlots`](#sourceplots) | per-source cutouts, cross-sections and magnitudes | 3 |
-| [`detector`](#detector) | whole-detector runs: tiles, stitching, mosaic and tile plots | 14 |
+| [`detector`](#detector) | whole-detector runs: tiles, stitching, mosaic and tile plots | 16 |
 | [`runPlots`](#runplots) | write every plot of a run, of the detector-level PSF, or of chosen tiles | 4 |
 | [`fastKernels`](#fastkernels) | fast PSF stamps (C++ with a NumPy fallback) | 6 |
 | [`sparseSolver`](#sparsesolver) | the sparse joint-fit solver: pipe_crowd's Eigen LSCG with an x >= 0 active set | 4 |
@@ -2108,6 +2108,8 @@ Whole-detector runs: tile, fit, stitch.
 | [`tileName`](#detectortilename) | Return the name of a tile, e.g. 'x0400_y0000_400x400'. |
 | [`addTileResiduals`](#detectoraddtileresiduals) | Add the RESIDUAL and RESIDUAL_SIGMA images to tile files written without them. |
 | [`saveTileProducts`](#detectorsavetileproducts) | Write one tile's results to a FITS file. |
+| [`buildSkyExtension`](#detectorbuildskyextension) | Rasterise neighbouring detectors' pixels into a sky border around a detector. |
+| [`skyExtension`](#detectorskyextension) | The neighbouring detectors' sky border of a detector, with a check of their sky levels. |
 | [`fitTiles`](#detectorfittiles) | Fit this task's share of a detector's tiles and write one file per tile. |
 | [`availableCpus`](#detectoravailablecpus) | Return the number of CPUs this process may actually use. |
 | [`limitBlasThreads`](#detectorlimitblasthreads) | Cap the threads of NumPy's BLAS / OpenMP libraries in this process (default: the usable CPUs). |
@@ -2186,6 +2188,46 @@ DATA, MODEL, RESIDUAL, RESIDUAL_SIGMA, VARIANCE and BAD images over the tile's f
 | Returns | Type | Description |
 | --- | --- | --- |
 | `path` | `str` | The file written. |
+
+### detector.buildSkyExtension
+
+`buildSkyExtension(detBox, strips, extendPx, clip=3.0)`
+
+Rasterise neighbouring detectors' pixels into a sky border around a detector.
+
+Every strip pixel is put on the detector's pixel grid at the nearest pixel of its mapped position; only positions outside the detector and at most ``extendPx`` beyond its edge are kept.  Bad pixels (``ok`` False) and star cores (more than ``clip`` sigma above the strip's median) are dropped; pixels landing on the same grid pixel are averaged.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `detBox` | `tuple` [`int`] | (x0, x1, y0, y1) of the detector, inclusive, parent px. |
+| `strips` | `list` [`dict`] | Per neighbour: ``x``, ``y`` (positions in the detector's pixel frame), ``value`` and ``var`` (on the detector's flux scale) and ``ok`` (usable), all 1-d arrays of equal size. |
+| `extendPx` | `int` | Border width [px]. |
+| `clip` | `float`, optional | Star-core cut [sigma above the median]. |
+
+| Returns | Type | Description |
+| --- | --- | --- |
+| `ext` | `dict` | ``img``, ``var`` (NaN / 0 where empty), ``ok`` over the detector grown by ``extendPx``; ``x0``, ``y0`` (parent px of element [0, 0]), ``det`` (= detBox), ``e`` (= extendPx), ``nPix`` (filled border pixels). |
+
+### detector.skyExtension
+
+`skyExtension(visitImage, visit, detector, extendPx, repo, collection, instrument, visitImageCollections, strips=None, verbose=True)`
+
+The neighbouring detectors' sky border of a detector, with a check of their sky levels.
+
+Builds the border (`buildSkyExtension` on `_neighbourStrips`) and prints, per side, the median of the border next to the edge against the median of this detector's own pixels just inside it: each detector's background was subtracted on its own, so an offset there would be carried into the edge tiles' sky.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `visitImage` | `lsst.afw.image.Exposure` | This detector's visit image. |
+| `visit, detector` | `int` | Visit and detector ids. |
+| `extendPx` | `int` | Border width [px]. |
+| `repo, collection, instrument, visitImageCollections` | `str` | Butler settings (as `fitTiles`). |
+| `strips` | `list` [`dict`], optional | Strips to use instead of reading the neighbours (tests). |
+| `verbose` | `bool`, optional | Print what was found. |
+
+| Returns | Type | Description |
+| --- | --- | --- |
+| `ext` | `dict` or `None` | As `buildSkyExtension` returns it, with ``offsets`` (per side: border - inside median), or None if no neighbour pixel was found. |
 
 ### detector.fitTiles
 

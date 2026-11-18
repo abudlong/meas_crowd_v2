@@ -191,6 +191,9 @@ PIPELINE_DEFAULTS = dict(
                                #   structure, e.g. the over-subtraction around dense star groups
     skyMeshPx=32,             # skyMedian="mesh": block size [px]
     skyMeshSmooth=3,          # skyMedian="mesh": median filter over this many cells (1 = none)
+    skyExtendPx=0,            # whole-detector runs (fitTiles): pixels of the neighbouring detectors
+                              #   up to this far beyond the detector edge also inform the sky mesh
+                              #   of the edge tiles (sky only, never the star fit; 0 = off)
     skyMeshMinPix=64,         # skyMedian="mesh": usable pixels a cell needs (else filled from neighbours)
     skyQuietSigma=0.5,        # skyMedian: sky pixels are those where the model < this x sigma
     skyStat="median",         # skyMedian: level of a block, "median" or "q25" (25th percentile +
@@ -930,7 +933,76 @@ def _padLinear(grid, k=1):
     return ext
 
 
-def _medianSkyMesh(resid, ok, block=32, minPix=64, smooth=3, sig=None):
+_SKY_EXT = {}   # the neighbouring detectors' border (set by detector.fitTiles; see skyExtension)
+
+
+def _planeFit(a):
+    """Coefficients (c0, cx, cy) of a least-squares plane c0 + cx x + cy y through ``a``'s finite
+    pixels (x, y = array column, row)."""
+    yy, xx = np.nonzero(np.isfinite(a))
+    if len(yy) < 3:
+        return np.zeros(3)
+    A = np.column_stack([np.ones(len(yy)), xx, yy]).astype(float)
+    return np.linalg.lstsq(A, a[yy, xx].astype(float), rcond=None)[0]
+
+
+def _extendSkyInputs(bbox, resid, quiet, sig, bgSub=None):
+    """Grow a tile's sky-mesh inputs by the neighbouring detectors' border (`_SKY_EXT`).
+
+    Only the sides of the tile's fit box that lie on the detector edge are grown, by the border
+    width.  There the border pixels (sky only: bad pixels and star cores dropped, on this
+    detector's flux scale) stand in for ``resid``; the background already subtracted from this
+    pass's image (``bgSub``, e.g. the plane refitted between passes) is extended to them as a
+    plane, so they are on the same footing.
+
+    Parameters
+    ----------
+    bbox : `lsst.geom.Box2I`
+        The tile's fit box.
+    resid, quiet, sig : `numpy.ndarray`
+        The tile's sky-mesh inputs (raw - model, usable sky pixels, pixel sigma).
+    bgSub : `numpy.ndarray`, optional
+        Background already subtracted from this pass's image over the fit box.
+
+    Returns
+    -------
+    inputs : `tuple` or `None`
+        (resid, quiet, sig over the grown box, slices of the fit box in it, border pixels used);
+        None if the tile is not on the detector edge or there is no border.
+    """
+    E = _SKY_EXT
+    if not E:
+        return None
+    e = int(E["e"])
+    dx0, dx1, dy0, dy1 = E["det"]
+    X0, Y0, X1, Y1 = bbox.getMinX(), bbox.getMinY(), bbox.getMaxX(), bbox.getMaxY()
+    gl, gr = (e if X0 <= dx0 else 0), (e if X1 >= dx1 else 0)
+    gb, gt = (e if Y0 <= dy0 else 0), (e if Y1 >= dy1 else 0)
+    if not (gl or gr or gb or gt):
+        return None
+    ex0, ey0 = X0 - gl - E["x0"], Y0 - gb - E["y0"]
+    ny, nx = resid.shape
+    NY, NX = ny + gb + gt, nx + gl + gr
+    sl = (slice(ey0, ey0 + NY), slice(ex0, ex0 + NX))
+    img, ok, var = E["img"][sl], E["ok"][sl], E["var"][sl]
+    if img.shape != (NY, NX):
+        return None
+    inner = (slice(gb, gb + ny), slice(gl, gl + nx))
+    residE = np.array(img, float)
+    if bgSub is not None:                      # the subtracted background, extended as a plane
+        c = _planeFit(np.asarray(bgSub, float))
+        yy, xx = np.mgrid[-gb:ny + gt, -gl:nx + gr]
+        residE = residE - (c[0] + c[1] * xx + c[2] * yy)
+    quietE = np.array(ok, bool)
+    sigE = np.sqrt(np.where(var > 0, var, np.inf))
+    residE[inner], quietE[inner], sigE[inner] = resid, quiet, sig
+    nExt = int(quietE.sum() - quiet.sum())
+    if nExt <= 0:
+        return None
+    return residE, quietE, sigE, inner, nExt
+
+
+def _medianSkyMesh(resid, ok, block=32, minPix=64, smooth=3, sig=None, centroids=False):
     """A smooth background surface from cell medians of ``resid`` on the ``ok`` pixels.
 
     The image is split into equal cells of about ``block`` px that cover it exactly.  Each cell
@@ -953,6 +1025,11 @@ def _medianSkyMesh(resid, ok, block=32, minPix=64, smooth=3, sig=None):
         Minimum usable pixels per cell.
     smooth : `int`, optional
         Median-filter size in cells (1 = none; odd).
+    sig : `numpy.ndarray`, optional
+        Pixel sigma: the cell level is then the 25th percentile + 0.674 sigma (`_skyLevel`).
+    centroids : `bool`, optional
+        Move each cell's level from its usable pixels' centroid to the cell centre along the
+        grid's gradient (for cells only partly covered).
 
     Returns
     -------
@@ -969,13 +1046,29 @@ def _medianSkyMesh(resid, ok, block=32, minPix=64, smooth=3, sig=None):
     ey = np.linspace(0, ny, gy + 1).round().astype(int)
     ex = np.linspace(0, nx, gx + 1).round().astype(int)
     grid = np.full((gy, gx), np.nan)
+    off = np.zeros((2, gy, gx))                 # centroid of a cell's pixels - its centre (y, x)
     for i in range(gy):
         for j in range(gx):
             sub = ok[ey[i]:ey[i + 1], ex[j]:ex[j + 1]]
             if sub.sum() >= minPix:
                 cs = (slice(ey[i], ey[i + 1]), slice(ex[j], ex[j + 1]))
                 grid[i, j] = _skyLevel(resid[cs][sub], None if sig is None else sig[cs][sub])
+                if centroids:
+                    py, px = np.nonzero(sub)
+                    off[0, i, j] = py.mean() - (sub.shape[0] - 1) / 2.0
+                    off[1, i, j] = px.mean() - (sub.shape[1] - 1) / 2.0
     have = np.isfinite(grid)
+    if centroids and have.sum() >= 2 and np.abs(off).max() > 0:
+        # a cell's level belongs to its pixels' centroid: move it to the cell centre along the
+        # grid's gradient (cells only partly covered, e.g. a border beyond a gap between detectors)
+        sy = (ey[-1] - ey[0]) / gy
+        sx = (ex[-1] - ex[0]) / gx
+        g0 = np.where(have, grid, np.nanmedian(grid))
+        for _ in range(6):                      # each round cuts the error by ~off / cell size
+            gy_, gx_ = (np.gradient(g0, sy, axis=0) if gy > 1 else np.zeros_like(g0),
+                        np.gradient(g0, sx, axis=1) if gx > 1 else np.zeros_like(g0))
+            g0 = np.where(have, grid - gy_ * off[0] - gx_ * off[1], g0)
+        grid = np.where(have, g0, np.nan)
     nCells = int(have.sum())
     if nCells == 0:
         return np.zeros((ny, nx)), np.zeros((gy, gx)), 0
@@ -3057,13 +3150,27 @@ def runInnerAdaptive(exposure, psf, badBitmask, S, P, outerIdx=0, thresholdStart
         quiet = skyOk & (modelFull < P["skyQuietSigma"] * skySig)
         sigQ = skySig if P["skyStat"] == "q25" else None
         if P["skyMedian"] == "mesh":
-            plane, grid, nb = _medianSkyMesh(skyRaw - modelFull, quiet, block=int(P["skyMeshPx"]),
-                                             minPix=int(P["skyMeshMinPix"]),
-                                             smooth=int(P["skyMeshSmooth"]), sig=sigQ)
+            resid = skyRaw - modelFull
+            ext = (_extendSkyInputs(bbox, resid, quiet, skySig, P.get("_bgSub"))
+                   if P["skyExtendPx"] else None)
+            if ext is not None:                       # an edge tile: + the neighbours' border
+                residE, quietE, sigE, inner, nExt = ext
+                surfE, grid, nb = _medianSkyMesh(residE, quietE, block=int(P["skyMeshPx"]),
+                                                 minPix=int(P["skyMeshMinPix"]),
+                                                 smooth=int(P["skyMeshSmooth"]),
+                                                 sig=sigE if sigQ is not None else None,
+                                                 centroids=True)
+                plane = surfE[inner]
+                extNote = f" + {nExt} px of the neighbouring detectors"
+            else:
+                plane, grid, nb = _medianSkyMesh(resid, quiet, block=int(P["skyMeshPx"]),
+                                                 minPix=int(P["skyMeshMinPix"]),
+                                                 smooth=int(P["skyMeshSmooth"]), sig=sigQ)
+                extNote = ""
             coef = np.array([float(np.median(plane)), float(plane.min()), float(plane.max())])
             print(f"  sky ({label}, mesh {P['skyMeshPx']} px): median {coef[0]:+.3f}, range "
                   f"{coef[1]:+.2f} .. {coef[2]:+.2f}, from {nb}/{grid.size} cells of "
-                  f"{int(quiet.sum())} px with model < {P['skyQuietSigma']:g} sigma")
+                  f"{int(quiet.sum())} px with model < {P['skyQuietSigma']:g} sigma{extNote}")
         else:
             plane, coef, nb = _medianSkyPlane(skyRaw - modelFull, quiet, sig=sigQ)
             print(f"  sky ({label}): {coef[0]:+.3f} (slopes {coef[1]:+.2f}, {coef[2]:+.2f} per "
@@ -4876,6 +4983,12 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
     print(f"{len(S['xy'])} Gaia starting position(s) for cutout {cb}")
 
     psfW, bgW, psfChange = psf, None, np.nan
+    bgSub = None                                    # background subtracted from the pass's image
+    if P["subtractInitialBg"] and bgImage is not None:
+        try:
+            bgSub = np.asarray(bgImage[cb].array, float)
+        except Exception:
+            bgSub = None
     hist = []
     for k in range(P["maxOuter"]):
         clearStampCache()
@@ -4886,6 +4999,7 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
               f"{L._fwhm(psfW, c):.3f}px, shape cut {'ON' if shapeNow else 'off'} =====")
         t0 = time.perf_counter()
         with L.TIMER.step("INNER LOOP (total)", outer=k, kind="wall"):
+            P["_bgSub"] = bgSub                     # for the sky mesh's neighbour border
             light = bool(P["lightFirstPass"] and P["refitPsf"] and k + 1 < P["maxOuter"])
             Pk = dict(P, brightCorr=False, skyRounds=1) if light else P
             if light:
@@ -5019,8 +5133,10 @@ def runAdaptivePipeline(exposureCrop, psf, badBitmask, gaiaXy=None, gaiaRows=Non
                                                   binSize=P["bgBinSize"])
                 else:
                     expN, bgW = refitBackgroundLowfit(expN, P["bgMode"])
+                bgSub = np.asarray(bgW.array, float) if bgW is not None else None
             except Exception as e:
                 print(f"  background refit failed ({type(e).__name__}: {e}) -- keeping image")
+                bgSub = None
         psfNew = psfW
         expN.setPsf(psfW)
         if P["refitPsf"]:

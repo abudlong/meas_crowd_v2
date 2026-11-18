@@ -232,6 +232,242 @@ def saveTileProducts(run, path, phot=None, meta=None):
     return path
 
 
+# ---------------------------------------------------------------- sky from neighbouring detectors
+_SKY_EXT_BAD = ("SAT", "BAD", "CR", "EDGE", "INTRP", "NO_DATA", "SUSPECT", "SAT_GROWN")
+
+
+def buildSkyExtension(detBox, strips, extendPx, clip=3.0):
+    """Rasterise neighbouring detectors' pixels into a sky border around a detector.
+
+    Every strip pixel is put on the detector's pixel grid at the nearest pixel of its mapped
+    position; only positions outside the detector and at most ``extendPx`` beyond its edge are
+    kept.  Bad pixels (``ok`` False) and star cores (more than ``clip`` sigma above the strip's
+    median) are dropped; pixels landing on the same grid pixel are averaged.
+
+    Parameters
+    ----------
+    detBox : `tuple` [`int`]
+        (x0, x1, y0, y1) of the detector, inclusive, parent px.
+    strips : `list` [`dict`]
+        Per neighbour: ``x``, ``y`` (positions in the detector's pixel frame), ``value`` and
+        ``var`` (on the detector's flux scale) and ``ok`` (usable), all 1-d arrays of equal size.
+    extendPx : `int`
+        Border width [px].
+    clip : `float`, optional
+        Star-core cut [sigma above the median].
+
+    Returns
+    -------
+    ext : `dict`
+        ``img``, ``var`` (NaN / 0 where empty), ``ok`` over the detector grown by ``extendPx``;
+        ``x0``, ``y0`` (parent px of element [0, 0]), ``det`` (= detBox), ``e`` (= extendPx),
+        ``nPix`` (filled border pixels).
+    """
+    x0, x1, y0, y1 = detBox
+    e = int(extendPx)
+    ox, oy = x0 - e, y0 - e
+    NY, NX = (y1 - y0 + 1) + 2 * e, (x1 - x0 + 1) + 2 * e
+    tot, n, vtot = np.zeros(NY * NX), np.zeros(NY * NX), np.zeros(NY * NX)
+    for st in strips:
+        x, y = np.asarray(st["x"], float), np.asarray(st["y"], float)
+        v, var = np.asarray(st["value"], float), np.asarray(st["var"], float)
+        ok = np.asarray(st["ok"], bool) & np.isfinite(v) & (var > 0)
+        if ok.sum() < 10:
+            continue
+        ok &= v <= np.median(v[ok]) + clip * np.sqrt(np.where(var > 0, var, np.inf))
+        ix, iy = np.round(x).astype(np.int64), np.round(y).astype(np.int64)
+        out = (ix < x0) | (ix > x1) | (iy < y0) | (iy > y1)
+        near = (ix >= ox) & (ix < ox + NX) & (iy >= oy) & (iy < oy + NY)
+        m = ok & out & near
+        k = (iy[m] - oy) * NX + (ix[m] - ox)
+        np.add.at(tot, k, v[m])
+        np.add.at(n, k, 1.0)
+        np.add.at(vtot, k, var[m])
+    filled = n > 0
+    img = np.full(NY * NX, np.nan)
+    varo = np.zeros(NY * NX)
+    img[filled] = tot[filled] / n[filled]
+    varo[filled] = vtot[filled] / n[filled] ** 2
+    return dict(img=img.reshape(NY, NX).astype(np.float32),
+                var=varo.reshape(NY, NX).astype(np.float32), ok=filled.reshape(NY, NX),
+                x0=ox, y0=oy, det=(x0, x1, y0, y1), e=e, nPix=int(filled.sum()))
+
+
+def _neighbourStrips(visitImage, visit, detector, extendPx, repo, collection, instrument,
+                     visitImageCollections, verbose=True):
+    """The neighbouring detectors' pixels within ``extendPx`` beyond this detector's edge.
+
+    Neighbours are found from the Butler's visit-detector regions (falling back to every
+    detector's WCS); of each, only the strip that maps near this detector is read (a ``bbox``
+    read).  Pixel centres are mapped through both WCSs onto this detector's pixel grid, values
+    and variances put on its flux scale through the two photometric calibrations' means.
+
+    Returns
+    -------
+    strips : `list` [`dict`]
+        As `buildSkyExtension` takes them, with ``detector`` (the neighbour's id).
+    """
+    import lsst.geom as geom
+    from lsst.daf.butler import Butler
+    butler = Butler(repo, collections=collection)
+    where = f"instrument='{instrument}' AND visit={visit}"
+    refs = butler.query_datasets("visit_image", collections=visitImageCollections, where=where,
+                                 find_first=False)
+    byDet = {}
+    for r in refs:
+        byDet.setdefault(int(r.dataId["detector"]), r)
+    byDet.pop(int(detector), None)
+    wcs, bb = visitImage.getWcs(), visitImage.getBBox()
+    calMe = float(visitImage.getPhotoCalib().getCalibrationMean())
+    e = int(extendPx)
+    # candidates: detectors whose sky region comes within reach of this one
+    cand = list(byDet)
+    try:
+        recs = {int(r.dataId["detector"]): r.region for r in butler.query_dimension_records(
+            "visit_detector_region", where=where)}
+        me = recs.get(int(detector))
+        if me is not None:
+            c0 = me.getBoundingCircle()
+            reach = 2.0 * (e + 100) * wcs.getPixelScale(bb.getCenter()).asRadians()
+
+            def sep(a, b):                       # angle between two unit vectors [rad]
+                return float(np.arccos(np.clip(a.dot(b), -1.0, 1.0)))
+
+            cand = [d for d in cand if d in recs
+                    and sep(c0.getCenter(), recs[d].getBoundingCircle().getCenter())
+                    < c0.getOpeningAngle().asRadians()
+                    + recs[d].getBoundingCircle().getOpeningAngle().asRadians() + reach]
+            if verbose:
+                print(f"sky extension: {len(cand)} neighbouring detector(s) within reach")
+    except Exception as ex:
+        if verbose:
+            print(f"sky extension: no detector regions ({type(ex).__name__}); checking every "
+                  f"detector's WCS")
+    # this detector's box grown by the border, as sky points along its outline
+    g = e + 2
+    xs = np.linspace(bb.getMinX() - g, bb.getMaxX() + g, 40)
+    ys = np.linspace(bb.getMinY() - g, bb.getMaxY() + g, 40)
+    px = np.concatenate([xs, xs, np.full(40, xs[0]), np.full(40, xs[-1])])
+    py = np.concatenate([np.full(40, ys[0]), np.full(40, ys[-1]), ys, ys])
+    ra, dec = wcs.pixelToSkyArray(px, py, degrees=True)
+    strips = []
+    for d in sorted(cand):
+        ref = byDet[d]
+        try:
+            wcsN = butler.get(ref.makeComponentRef("wcs"))
+            bbN = butler.get(ref.makeComponentRef("bbox"))
+            nx_, ny_ = wcsN.skyToPixelArray(ra, dec, degrees=True)
+            if not np.isfinite(nx_).any():
+                continue
+            box = geom.Box2I(geom.Point2I(int(np.floor(np.nanmin(nx_))), int(np.floor(np.nanmin(ny_)))),
+                             geom.Point2I(int(np.ceil(np.nanmax(nx_))), int(np.ceil(np.nanmax(ny_)))))
+            box.clip(bbN)
+            if box.isEmpty():
+                continue
+            strip = butler.get(ref, parameters={"bbox": box})
+            sb = strip.getBBox()
+            yy, xx = np.mgrid[sb.getMinY():sb.getMaxY() + 1, sb.getMinX():sb.getMaxX() + 1]
+            r_, d_ = wcsN.pixelToSkyArray(xx.ravel().astype(float), yy.ravel().astype(float),
+                                          degrees=True)
+            mx, my = wcs.skyToPixelArray(r_, d_, degrees=True)
+            k = float(strip.getPhotoCalib().getCalibrationMean()) / calMe
+            mk = strip.mask
+            bad = 0
+            for nm in _SKY_EXT_BAD:
+                try:
+                    bad |= mk.getPlaneBitMask(nm)
+                except Exception:
+                    pass
+            strips.append(dict(detector=d, x=mx, y=my, value=strip.image.array.ravel() * k,
+                               var=strip.variance.array.ravel() * k * k,
+                               ok=(mk.array.ravel() & bad) == 0))
+            if verbose:
+                print(f"  detector {d}: strip {sb.getWidth()} x {sb.getHeight()} px, flux scale "
+                      f"{k:.4f}")
+        except Exception as ex:
+            if verbose:
+                print(f"  detector {d}: skipped ({type(ex).__name__}: {ex})")
+    return strips
+
+
+def skyExtension(visitImage, visit, detector, extendPx, repo, collection, instrument,
+                 visitImageCollections, strips=None, verbose=True):
+    """The neighbouring detectors' sky border of a detector, with a check of their sky levels.
+
+    Builds the border (`buildSkyExtension` on `_neighbourStrips`) and prints, per side, the
+    median of the border next to the edge against the median of this detector's own pixels just
+    inside it: each detector's background was subtracted on its own, so an offset there would be
+    carried into the edge tiles' sky.
+
+    Parameters
+    ----------
+    visitImage : `lsst.afw.image.Exposure`
+        This detector's visit image.
+    visit, detector : `int`
+        Visit and detector ids.
+    extendPx : `int`
+        Border width [px].
+    repo, collection, instrument, visitImageCollections : `str`
+        Butler settings (as `fitTiles`).
+    strips : `list` [`dict`], optional
+        Strips to use instead of reading the neighbours (tests).
+    verbose : `bool`, optional
+        Print what was found.
+
+    Returns
+    -------
+    ext : `dict` or `None`
+        As `buildSkyExtension` returns it, with ``offsets`` (per side: border - inside median),
+        or None if no neighbour pixel was found.
+    """
+    t0 = time.perf_counter()
+    bb = visitImage.getBBox()
+    detBox = (bb.getMinX(), bb.getMaxX(), bb.getMinY(), bb.getMaxY())
+    if strips is None:
+        strips = _neighbourStrips(visitImage, visit, detector, extendPx, repo, collection,
+                                  instrument, visitImageCollections, verbose=verbose)
+    ext = buildSkyExtension(detBox, strips, extendPx)
+    if ext["nPix"] == 0:
+        if verbose:
+            print("sky extension: no neighbouring pixels found -- off")
+        return None
+    img, ok = ext["img"], ext["ok"]
+    e = ext["e"]
+    me = np.asarray(visitImage.image.array, float)
+    meOk = np.isfinite(me)
+    try:
+        mk = visitImage.mask
+        bad = 0
+        for nm in _SKY_EXT_BAD:
+            try:
+                bad |= mk.getPlaneBitMask(nm)
+            except Exception:
+                pass
+        meOk &= (mk.array & bad) == 0
+    except Exception:
+        pass
+    w = 10
+    sides = dict(left=((slice(None), slice(0, e)), (slice(None), slice(0, w))),
+                 right=((slice(None), slice(-e, None)), (slice(None), slice(-w, None))),
+                 bottom=((slice(0, e), slice(None)), (slice(0, w), slice(None))),
+                 top=((slice(-e, None), slice(None)), (slice(-w, None), slice(None))))
+    offsets = {}
+    for side, (bsl, msl) in sides.items():
+        b = img[bsl][ok[bsl]]
+        m = me[msl][meOk[msl]]
+        if len(b) > 100 and len(m) > 100:
+            offsets[side] = float(np.median(b) - np.median(m))
+    ext["offsets"] = offsets
+    if verbose:
+        dets = sorted({s.get("detector") for s in strips} - {None})
+        print(f"sky extension: {ext['nPix']} px within {e} px beyond the edge from detector(s) "
+              f"{dets} in {time.perf_counter() - t0:.0f} s; median border - inside (counts): "
+              + ", ".join(f"{k} {v:+.1f}" for k, v in offsets.items())
+              + "  (each detector's background was subtracted on its own: a large offset is "
+                "carried into the edge tiles' sky)")
+    return ext
+
+
 # ---------------------------------------------------------------- fitting
 def _loadVisitImage(visit, detector, repo, collection, instrument, visitImageCollections):
     """Load a visit image through the Butler."""
@@ -394,6 +630,17 @@ def fitTiles(visit, detector, config=None, outDir="detector_run", tile=400, pad=
     if nJobs and nJobs > 1 and len(names) > 1:
         _TILE["logDir"] = os.path.join(outDir, "logs")
         os.makedirs(_TILE["logDir"], exist_ok=True)
+    from . import pipeline as _pl
+    _pl._SKY_EXT.clear()
+    if P["skyExtendPx"]:
+        # the neighbours' sky border, read once here and shared with the forked workers
+        try:
+            ext = skyExtension(visitImage, visit, detector, int(P["skyExtendPx"]), repo,
+                               collection, instrument, visitImageCollections)
+            if ext is not None:
+                _pl._SKY_EXT.update(ext)
+        except Exception as e:
+            print(f"sky extension failed ({type(e).__name__}: {e}) -- off")
     if P["detectorPsf"] and len(names) > 1:
         # a grid of local PSFs: the sampled tiles are fitted the full way (pass, their own PIFF
         # PSF, another pass) and their PIFF models are interpolated for every other tile, which
@@ -432,6 +679,7 @@ def fitTiles(visit, detector, config=None, outDir="detector_run", tile=400, pad=
     else:
         _runTiles(names, nJobs, tAll)
     _TILE.clear()
+    _pl._SKY_EXT.clear()
     print(f"\ntask {taskIndex + 1}/{nTasks}: {len(todo)} tile(s) in "
           f"{time.perf_counter() - tAll:.0f} s")
     return sorted(p for p in paths.values() if os.path.exists(p))

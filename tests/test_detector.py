@@ -168,6 +168,96 @@ class SampleTilesTestCase(unittest.TestCase):
             self.assertIn(corner, {nm[:11] for nm in names})     # the edges are sampled
 
 
+class SkyExtensionTestCase(unittest.TestCase):
+    """The neighbouring detectors' sky border: `buildSkyExtension` and `skyExtension`."""
+
+    @staticmethod
+    def _strip(x0, x1, y0, y1, value=-20.0, seed=0):
+        rng = np.random.default_rng(seed)
+        yy, xx = np.mgrid[y0:y1, x0:x1]
+        v = value + rng.normal(0, 5, xx.shape)
+        return dict(x=xx.ravel().astype(float), y=yy.ravel().astype(float), value=v.ravel(),
+                    var=np.full(xx.size, 25.0), ok=np.ones(xx.size, bool))
+
+    def testBorderOnlyOutsideAndWithinReach(self):
+        left = self._strip(-60, -5, 0, 100)                     # a neighbour 5 px beyond x = 0
+        left["value"][0] = 1e6                                  # a star core: dropped
+        inside = self._strip(0, 50, 0, 100)                     # overlapping pixels: ignored
+        ext = det.buildSkyExtension((0, 199, 0, 99), [left, inside], 20)
+        self.assertEqual(ext["img"].shape, (140, 240))
+        self.assertEqual((ext["x0"], ext["y0"], ext["e"]), (-20, -20, 20))
+        cols = np.flatnonzero(ext["ok"].any(axis=0)) + ext["x0"]
+        np.testing.assert_array_equal(cols, np.arange(-20, -5))   # -20 .. -6: the reach, no gap
+        self.assertFalse(ext["ok"][20:120, 20:220].any())          # nothing over the detector
+        self.assertEqual(ext["nPix"], 15 * 100 - 1)
+        self.assertLess(abs(np.nanmedian(ext["img"]) + 20.0), 0.5)
+        empty = det.buildSkyExtension((0, 199, 0, 99), [], 20)
+        self.assertEqual(empty["nPix"], 0)
+
+    def testDuplicatesAveraged(self):
+        a = self._strip(-10, -5, 0, 10, value=-10.0)
+        b = self._strip(-10, -5, 0, 10, value=-30.0)
+        ext = det.buildSkyExtension((0, 99, 0, 99), [a, b], 20)
+        self.assertLess(abs(np.nanmean(ext["img"]) + 20.0), 1.0)
+
+    def testOffsetsReported(self):
+        img = np.full((100, 200), -20.0)
+        vis = lsstStubs.FakeExposure(img, np.full(img.shape, 25.0))
+        strips = [self._strip(-30, 0, 0, 100, value=-26.0)]     # the neighbour's sky 6 lower
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            ext = det.skyExtension(vis, 1, 2, 20, None, None, None, None, strips=strips)
+        self.assertAlmostEqual(ext["offsets"]["left"], -6.0, delta=0.5)
+        self.assertNotIn("right", ext["offsets"])
+        self.assertIn("left -6", out.getvalue())
+
+
+class ExtendSkyInputsTestCase(unittest.TestCase):
+    """`pipeline._extendSkyInputs`: an edge tile's sky inputs grown by the border."""
+
+    def setUp(self):
+        strip = SkyExtensionTestCase._strip(-30, 0, 0, 300, value=-20.0)
+        pipeline._SKY_EXT.clear()
+        pipeline._SKY_EXT.update(det.buildSkyExtension((0, 399, 0, 299), [strip], 20))
+
+    def tearDown(self):
+        pipeline._SKY_EXT.clear()
+
+    def test(self):
+        resid = np.full((120, 100), -20.0)
+        quiet = np.ones(resid.shape, bool)
+        sig = np.full(resid.shape, 5.0)
+        inner = geom.Box2I(geom.Point2I(150, 100), geom.Point2I(249, 219))
+        self.assertIsNone(pipeline._extendSkyInputs(inner, resid, quiet, sig))   # not on an edge
+        edge = geom.Box2I(geom.Point2I(0, 100), geom.Point2I(99, 219))
+        rE, qE, sE, sl, n = pipeline._extendSkyInputs(edge, resid, quiet, sig)
+        self.assertEqual(rE.shape, (120, 120))                  # grown 20 px to the left only
+        np.testing.assert_array_equal(rE[sl], resid)
+        self.assertGreater(n, 20 * 120 - 20)                    # minus the 3-sigma star cut
+        self.assertGreater(qE[:, :20].mean(), 0.99)
+        # the background already subtracted from the pass (a plane) is extended to the border
+        yy, xx = np.mgrid[0:120, 0:100]
+        bg = 3.0 + 0.1 * xx - 0.05 * yy
+        rB, _, _, _, _ = pipeline._extendSkyInputs(edge, resid, quiet, sig, bgSub=bg)
+        yE, xE = np.mgrid[0:120, -20:0]
+        self.assertLess(abs(np.nanmedian(rB[:, :20] - (rE[:, :20] - (3.0 + 0.1 * xE
+                                                                     - 0.05 * yE)))), 1e-6)
+
+
+class MeshCentroidsTestCase(unittest.TestCase):
+    def testPartlyCoveredCellsOnAPlane(self):
+        """With ``centroids`` a plane comes out exact although some cells are half covered."""
+        from lsst.meas.crowd import pipeline as pl
+        yy, xx = np.mgrid[0:128, 0:160]
+        plane = -20.0 + 0.2 * xx - 0.1 * yy
+        ok = np.ones(plane.shape, bool)
+        ok[:, :16] = False                                       # the first column of cells: half
+        s0 = pl._medianSkyMesh(plane, ok, block=32, smooth=1)[0]
+        s1 = pl._medianSkyMesh(plane, ok, block=32, smooth=1, centroids=True)[0]
+        self.assertGreater(np.abs(s0 - plane).max(), 1.0)
+        self.assertLess(np.abs(s1 - plane).max(), 0.05)
+
+
 class GridPsfsTestCase(unittest.TestCase):
     def test(self):
         k1, k2 = lsstStubs.gaussianKernel(1.5, 6), lsstStubs.gaussianKernel(3.0, 8)   # sizes differ
